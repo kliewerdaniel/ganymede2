@@ -35,6 +35,10 @@ def main():
     # gate
     gate_parser = subparsers.add_parser("gate", help="Run quality gates")
 
+    # investigate
+    investigate_parser = subparsers.add_parser("investigate", help="Run investigation loop")
+    investigate_parser.add_argument("--max-investigations", type=int, default=10, help="Max investigations to create")
+
     # explain
     explain_parser = subparsers.add_parser("explain", help="Explain a claim")
     explain_parser.add_argument("claim_id", help="Claim ID")
@@ -73,6 +77,8 @@ def main():
         asyncio.run(_cmd_status(args))
     elif args.command == "refine":
         asyncio.run(_cmd_refine(args))
+    elif args.command == "investigate":
+        asyncio.run(_cmd_investigate(args))
     else:
         parser.print_help()
         sys.exit(1)
@@ -334,6 +340,51 @@ async def _cmd_refine(args):
         print(f"  ledger events: {len(rel_report.inference_events)}")
         if rel_report.errors:
             print(f"  errors: {len(rel_report.errors)}")
+
+
+async def _cmd_investigate(args):
+    """Run the investigation loop — detect open questions, create investigation plans."""
+    from .database import create_tables, get_session
+    from .investigation import InvestigationEngine
+    from sqlalchemy import select
+    from .database import ClaimRecord, EvidenceUnitRecord, ContradictionRecord, InvestigationRecord
+
+    await create_tables()
+
+    async with get_session() as session:
+        claims = [_row_to_dict(r) for r in (await session.execute(select(ClaimRecord))).scalars().all()]
+        evidence = [_row_to_dict(r) for r in (await session.execute(select(EvidenceUnitRecord))).scalars().all()]
+        contradictions = [_row_to_dict(r) for r in (await session.execute(select(ContradictionRecord))).scalars().all()]
+        existing_investigations = [_row_to_dict(r) for r in (await session.execute(select(InvestigationRecord))).scalars().all()]
+
+    engine = InvestigationEngine(
+        claims=claims,
+        evidence=evidence,
+        contradictions=contradictions,
+        existing_investigations=existing_investigations,
+    )
+
+    plans = engine.detect_open_questions()[: args.max_investigations]
+
+    print(f"\nInvestigation Queue — {len(plans)} open question(s)")
+    print("=" * 60)
+
+    for i, plan in enumerate(plans):
+        print(f"\n[{i+1}] {plan.investigation_id}")
+        print(f"  Q: {plan.question}")
+        print(f"  Status: {plan.status} | Priority: {plan.priority}")
+        print(f"  Claims: {', '.join(claim_id[:12] for claim_id in plan.claim_ids)}")
+        print(f"  Targets:")
+        for t in plan.evidence_targets:
+            print(f"    - [{t.target_type}] {t.description[:80]}... (p={t.priority})")
+        print(f"  Rationale: {plan.rationale[:100]}")
+
+    if not plans:
+        print("\nNo open questions detected. Epistemic Graph is clean.")
+
+    print(f"\n{'=' * 60}")
+    print(f"Total: {len(plans)} investigation(s) proposed")
+    print(f"Run 'ganymede investigate --max-investigations N' to adjust queue size")
 
 
 if __name__ == "__main__":
