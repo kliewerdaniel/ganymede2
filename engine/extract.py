@@ -53,6 +53,8 @@ def normalise_entity(label: str) -> str:
 
 @dataclass
 class Extraction:
+    source_id: str = ""
+    source_checksum: str = ""
     entities: List[Dict] = field(default_factory=list)
     claims: List[Dict] = field(default_factory=list)
     evidence: List[Dict] = field(default_factory=list)
@@ -141,7 +143,10 @@ def extract_source(
     author = source.get("author") or ""
     ts = source.get("fetched_at")
 
-    ex = Extraction()
+    ex = Extraction(
+        source_id=sid,
+        source_checksum=source.get("checksum", ""),
+    )
 
     ent_counts = extract_entities(text, vocabulary)
     threshold = 2 if len(text) > 6000 else 1

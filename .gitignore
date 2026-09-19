@@ -50,6 +50,7 @@ artifact/nextjs/.next/
 artifact/nextjs/node_modules/
 artifact/nextjs/out/
 artifact/dist/
+artifact/nextjs/public/
 
 # Database
 *.sqlite3

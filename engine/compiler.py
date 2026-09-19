@@ -92,9 +92,10 @@ class Compiler:
             try:
                 new_id = await self.evidence_store.put_source(source)
                 if new_id is None:
-                    report.sources_cached += 1
-                    continue
-                report.sources_extracted += 1
+                    # Source was cached — still process structural units + evidence
+                    pass
+                else:
+                    report.sources_extracted += 1
 
                 # Stage 3: Structural parsing
                 units = canon.structural_parse(source)
@@ -116,6 +117,20 @@ class Compiler:
         # Stage 6: Claim graph construction
         if all_extractions:
             await self._build_claim_graph(all_extractions, report)
+
+        # Stage 6b: Persist evidence units (after claims exist for FK integrity)
+        if all_extractions:
+            for extraction in all_extractions:
+                for ev in extraction.evidence:
+                    ev_record = {
+                        **ev,
+                        "claim_id": None,  # FK to claims — linked via claim.evidence_ids
+                        "source_id": extraction.source_id,
+                        "parser_version": "1.0.0",
+                        "source_checksum": extraction.source_checksum,
+                    }
+                    await self.evidence_store.put_evidence_unit(ev_record)
+                    report.evidence_units += 1
 
         report.seconds = time.time() - start
         return report

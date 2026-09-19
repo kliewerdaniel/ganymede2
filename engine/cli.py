@@ -166,7 +166,7 @@ async def _cmd_artifact_build(args):
     print(f"\nArtifact build complete. Fingerprint: {ir.corpus_fingerprint}")
 
     # Also copy to Next.js public directory
-    nextjs_public = Path("../artifact/nextjs/public")
+    nextjs_public = Path(args.output).resolve().parent / "artifact" / "nextjs" / "public"
     if nextjs_public.exists():
         shutil.copy2(ir_path, nextjs_public / "artifact.json")
         # Copy intermediates
@@ -256,3 +256,7 @@ async def _cmd_status(args):
     for status, count in status_counts.items():
         print(f"    {status:15s} {count}")
     print(f"{'='*50}\n")
+
+
+if __name__ == "__main__":
+    main()
