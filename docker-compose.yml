@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ganymede-postgres
+    environment:
+      POSTGRES_USER: ganymede
+      POSTGRES_PASSWORD: ganymede
+      POSTGRES_DB: ganymede
+    ports:
+      - "5432:5432"
+    volumes:
+      - ganymede-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ganymede"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ganymede-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ganymede-ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+volumes:
+  ganymede-pgdata:
+  ganymede-ollama:
