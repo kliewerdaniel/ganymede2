@@ -2,29 +2,30 @@
 
 Stores sources, structural units, evidence units, and contradictions.
 Content-hash gated: identical input produces no write.
+Uses session.add(Model(**data)) to avoid SQLAlchemy 2.0 bulk insert path.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .database import (
+    ContradictionRecord,
     EvidenceUnitRecord,
     SourceRecord,
     StructuralUnitRecord,
-    ContradictionRecord,
     get_session,
 )
 
 
 def _compute_content_hash(record: Dict[str, Any], exclude: set = None) -> str:
     """Compute a deterministic content hash over a record."""
-    exclude = exclude or {"_meta", "created_at", "updated_at", "content_hash"}
+    exclude = exclude or {"_meta", "created_at", "updated_at", "content_hash", "fetched_at"}
     canonical = {}
     for k, v in sorted(record.items()):
         if k in exclude:
@@ -39,7 +40,84 @@ def _compute_content_hash(record: Dict[str, Any], exclude: set = None) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-import json
+def _source_record_from_dict(record: Dict[str, Any]) -> SourceRecord:
+    return SourceRecord(
+        id=record["id"],
+        type=record["type"],
+        origin=record["origin"],
+        text=record["text"],
+        url=record.get("url"),
+        domain=record.get("domain"),
+        author=record.get("author"),
+        fetched_at=record["fetched_at"],
+        checksum=record["checksum"],
+        parser_version=record["parser_version"],
+        normalization_version=record["normalization_version"],
+        status=record.get("status", "active"),
+        metadata_json=record.get("metadata_json", record.get("metadata", {})),
+        created_at=record.get("created_at", time.time()),
+        updated_at=record.get("updated_at", time.time()),
+        content_hash=record["content_hash"],
+    )
+
+
+def _structural_unit_from_dict(record: Dict[str, Any]) -> StructuralUnitRecord:
+    return StructuralUnitRecord(
+        id=record["id"],
+        source_id=record["source_id"],
+        type=record["type"],
+        text=record["text"],
+        offset=record["offset"],
+        span_start=record["span_start"],
+        span_end=record["span_end"],
+        parent_id=record.get("parent_id"),
+        metadata_json=record.get("metadata_json", record.get("metadata", {})),
+        created_at=record.get("created_at", time.time()),
+        content_hash=record["content_hash"],
+    )
+
+
+def _evidence_unit_from_dict(record: Dict[str, Any]) -> EvidenceUnitRecord:
+    return EvidenceUnitRecord(
+        id=record["id"],
+        source_id=record["source_id"],
+        structural_unit_id=record.get("structural_unit_id"),
+        claim_id=record.get("claim_id"),
+        domain=record.get("domain"),
+        author=record.get("author"),
+        stance=record.get("stance", "support"),
+        quote=record["quote"],
+        offset=record["offset"],
+        timestamp=record.get("timestamp"),
+        reliability=record.get("reliability"),
+        source_checksum=record["source_checksum"],
+        parser_version=record["parser_version"],
+        needs_revalidation=record.get("needs_revalidation", False),
+        stale_evidence=record.get("stale_evidence", 0),
+        created_at=record.get("created_at", time.time()),
+        content_hash=record["content_hash"],
+    )
+
+
+def _contradiction_from_dict(record: Dict[str, Any]) -> ContradictionRecord:
+    return ContradictionRecord(
+        id=record["id"],
+        anchor_words=record["anchor_words"],
+        entity_id=record.get("entity_id"),
+        claim_a_id=record["claim_a_id"],
+        claim_b_id=record["claim_b_id"],
+        text_a=record["text_a"],
+        text_b=record["text_b"],
+        overlap=record["overlap"],
+        sources_a=record["sources_a"],
+        sources_b=record["sources_b"],
+        status=record.get("status", "open"),
+        resolution=record.get("resolution"),
+        resolved_by=record.get("resolved_by"),
+        created_at=record.get("created_at", time.time()),
+        updated_at=record.get("updated_at", time.time()),
+        content_hash=record["content_hash"],
+    )
 
 
 class EvidenceGraphStore:
@@ -65,7 +143,7 @@ class EvidenceGraphStore:
             "parser_version": source["parser_version"],
             "normalization_version": source["normalization_version"],
             "status": "active",
-            "metadata": source.get("metadata", {}),
+            "metadata_json": source.get("metadata", {}),
             "created_at": now,
             "updated_at": now,
         }
@@ -78,11 +156,8 @@ class EvidenceGraphStore:
             if existing.scalar() == record["content_hash"]:
                 return None  # unchanged
 
-            await session.execute(
-                pg_insert(SourceRecord)
-                .values(**record)
-                .on_conflict_do_nothing(index_elements=["content_hash"])
-            )
+            obj = _source_record_from_dict(record)
+            session.add(obj)
             return record["id"]
 
     async def get_source(self, source_id: str) -> Optional[Dict]:
@@ -126,23 +201,22 @@ class EvidenceGraphStore:
             "span_start": unit["span_start"],
             "span_end": unit["span_end"],
             "parent_id": unit.get("parent_id"),
-            "metadata": unit.get("metadata", {}),
+            "metadata_json": unit.get("metadata", {}),
             "created_at": time.time(),
         }
         record["content_hash"] = _compute_content_hash(record)
 
         async with get_session() as session:
             existing = await session.execute(
-                select(StructuralUnitRecord.content_hash).where(StructuralUnitRecord.id == record["id"])
+                select(StructuralUnitRecord.content_hash).where(
+                    StructuralUnitRecord.id == record["id"]
+                )
             )
             if existing.scalar() == record["content_hash"]:
                 return None
 
-            await session.execute(
-                pg_insert(StructuralUnitRecord)
-                .values(**record)
-                .on_conflict_do_nothing(index_elements=["content_hash"])
-            )
+            obj = _structural_unit_from_dict(record)
+            session.add(obj)
             return record["id"]
 
     # ------------------------------------------------------------------
@@ -172,16 +246,15 @@ class EvidenceGraphStore:
 
         async with get_session() as session:
             existing = await session.execute(
-                select(EvidenceUnitRecord.content_hash).where(EvidenceUnitRecord.id == record["id"])
+                select(EvidenceUnitRecord.content_hash).where(
+                    EvidenceUnitRecord.id == record["id"]
+                )
             )
             if existing.scalar() == record["content_hash"]:
                 return None
 
-            await session.execute(
-                pg_insert(EvidenceUnitRecord)
-                .values(**record)
-                .on_conflict_do_nothing(index_elements=["content_hash"])
-            )
+            obj = _evidence_unit_from_dict(record)
+            session.add(obj)
             return record["id"]
 
     async def get_evidence_for_claim(self, claim_id: str) -> List[Dict]:
@@ -201,7 +274,9 @@ class EvidenceGraphStore:
     async def claim_id_for_evidence(self, evidence_id: str) -> Optional[str]:
         async with get_session() as session:
             result = await session.execute(
-                select(EvidenceUnitRecord.claim_id).where(EvidenceUnitRecord.id == evidence_id)
+                select(EvidenceUnitRecord.claim_id).where(
+                    EvidenceUnitRecord.id == evidence_id
+                )
             )
             return result.scalar()
 
@@ -232,16 +307,15 @@ class EvidenceGraphStore:
 
         async with get_session() as session:
             existing = await session.execute(
-                select(ContradictionRecord.content_hash).where(ContradictionRecord.id == record["id"])
+                select(ContradictionRecord.content_hash).where(
+                    ContradictionRecord.id == record["id"]
+                )
             )
             if existing.scalar() == record["content_hash"]:
                 return None
 
-            await session.execute(
-                pg_insert(ContradictionRecord)
-                .values(**record)
-                .on_conflict_do_nothing(index_elements=["content_hash"])
-            )
+            obj = _contradiction_from_dict(record)
+            session.add(obj)
             return record["id"]
 
     # ------------------------------------------------------------------

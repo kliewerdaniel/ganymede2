@@ -1,7 +1,8 @@
 """Epistemic Graph store — versioned, history-retained.
 
 Stores claims, investigations, and ledger events.
-Status is a pure function of evidence, recomputed each compile.
+Status is a pure function of evidence, recompiled each compile.
+Uses session.add(Model(**data)) to avoid SQLAlchemy 2.0 bulk insert path.
 """
 
 from __future__ import annotations
@@ -11,8 +12,7 @@ import json
 import time
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import select, update
 
 from .database import (
     ClaimRecord,
@@ -38,6 +38,60 @@ def _compute_content_hash(record: Dict[str, Any]) -> str:
             canonical[k] = str(v)
     payload = json.dumps(canonical, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _claim_record_from_dict(record: Dict[str, Any]) -> ClaimRecord:
+    return ClaimRecord(
+        id=record["id"],
+        text=record["text"],
+        normalized=record["normalized"],
+        status=record["status"],
+        confidence=record["confidence"],
+        confidence_terms=record.get("confidence_terms", {}),
+        evidence_ids=record.get("evidence_ids", []),
+        source_ids=record.get("source_ids", []),
+        entity_ids=record.get("entity_ids", []),
+        contradiction_ids=record.get("contradiction_ids", []),
+        derived_from=record.get("derived_from", []),
+        compiler_version=record["compiler_version"],
+        policy_version=record["policy_version"],
+        history=record.get("history", []),
+        created_at=record.get("created_at", time.time()),
+        updated_at=record.get("updated_at", time.time()),
+        content_hash=record["content_hash"],
+    )
+
+
+def _investigation_record_from_dict(record: Dict[str, Any]) -> InvestigationRecord:
+    return InvestigationRecord(
+        id=record["id"],
+        question=record["question"],
+        status=record.get("status", "open"),
+        claim_id=record.get("claim_id"),
+        claim_ids=record.get("claim_ids", []),
+        evidence_ids=record.get("evidence_ids", []),
+        rationale=record.get("rationale"),
+        created_at=record.get("created_at", time.time()),
+        completed_at=record.get("completed_at"),
+    )
+
+
+def _ledger_event_record_from_dict(record: Dict[str, Any]) -> LedgerEventRecord:
+    return LedgerEventRecord(
+        id=record["id"],
+        event_type=record["event_type"],
+        actor=record["actor"],
+        operation=record["operation"],
+        inputs=record.get("inputs", {}),
+        outputs=record.get("outputs", {}),
+        input_hashes=record.get("input_hashes", []),
+        output_hashes=record.get("output_hashes", []),
+        model=record.get("model"),
+        policy_version=record["policy_version"],
+        parent_event_id=record.get("parent_event_id"),
+        timestamp=record.get("timestamp", time.time()),
+        metadata_json=record.get("metadata", {}),
+    )
 
 
 class EpistemicGraphStore:
@@ -94,20 +148,15 @@ class EpistemicGraphStore:
                 record["created_at"] = existing_claim.created_at
                 record["updated_at"] = now
 
+                # Use update
                 await session.execute(
-                    pg_insert(ClaimRecord)
+                    update(ClaimRecord)
+                    .where(ClaimRecord.id == record["id"])
                     .values(**record)
-                    .on_conflict_do_update(
-                        index_elements=["id"],
-                        set_=record,
-                    )
                 )
             else:
-                await session.execute(
-                    pg_insert(ClaimRecord)
-                    .values(**record)
-                    .on_conflict_do_nothing(index_elements=["id"])
-                )
+                obj = _claim_record_from_dict(record)
+                session.add(obj)
 
             return record["id"]
 
@@ -159,11 +208,8 @@ class EpistemicGraphStore:
         }
 
         async with get_session() as session:
-            await session.execute(
-                pg_insert(InvestigationRecord)
-                .values(**record)
-                .on_conflict_do_nothing(index_elements=["id"])
-            )
+            obj = _investigation_record_from_dict(record)
+            session.add(obj)
             return record["id"]
 
     # ------------------------------------------------------------------
@@ -189,11 +235,8 @@ class EpistemicGraphStore:
         }
 
         async with get_session() as session:
-            await session.execute(
-                pg_insert(LedgerEventRecord)
-                .values(**record)
-                .on_conflict_do_nothing(index_elements=["id"])
-            )
+            obj = _ledger_event_record_from_dict(record)
+            session.add(obj)
             return record["id"]
 
     async def get_ledger_events(self, claim_id: str = None, event_type: str = None,
