@@ -42,6 +42,15 @@ def main():
     # status
     status_parser = subparsers.add_parser("status", help="Show corpus status")
 
+    # refine
+    refine_parser = subparsers.add_parser("refine", help="Optional model refinement (Stage 5)")
+    refine_parser.add_argument("--model", default="qwen3:8b", help="Model to use")
+    refine_parser.add_argument("--max-claims", type=int, default=10, help="Max claims to refine")
+    refine_parser.add_argument(
+        "--relationships", action="store_true",
+        help="Also propose typed relationships from source texts",
+    )
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -62,6 +71,8 @@ def main():
         asyncio.run(_cmd_explain(args))
     elif args.command == "status":
         asyncio.run(_cmd_status(args))
+    elif args.command == "refine":
+        asyncio.run(_cmd_refine(args))
     else:
         parser.print_help()
         sys.exit(1)
@@ -256,6 +267,73 @@ async def _cmd_status(args):
     for status, count in status_counts.items():
         print(f"    {status:15s} {count}")
     print(f"{'='*50}\n")
+
+
+async def _cmd_refine(args):
+    """Optional model refinement pass (Stage 5) — gated on provider availability."""
+    from .database import create_tables, get_session
+    from .inference import select_provider, log_inference_event
+    from .refine import RefinementTarget, refine_claims, propose_relationships
+    from .store_epistemic import EpistemicGraphStore
+    from sqlalchemy import select
+    from .database import ClaimRecord, SourceRecord
+
+    await create_tables()
+
+    provider = select_provider()
+    if provider is None:
+        print("No inference provider available — deterministic layer stands alone.")
+        print("(Start Ollama or configure a provider in config.yaml to enable refinement.)")
+        return
+
+    print(f"Provider: {provider.name} (sovereignty crossed: {provider.sovereignty_crossed})")
+    print(f"Model:    {args.model}")
+
+    store = EpistemicGraphStore()
+
+    # Load claims + sources
+    async with get_session() as session:
+        claims = (await session.execute(select(ClaimRecord))).scalars().all()
+        sources = (await session.execute(select(SourceRecord))).scalars().all()
+
+    existing_claim_ids = [c.id for c in claims]
+
+    # Claim refinement
+    targets = [
+        RefinementTarget(claim_id=c.id, text=c.text, quote=(c.text or "")[:400])
+        for c in claims[: args.max_claims]
+    ]
+    print(f"\nRefining {len(targets)} claims...")
+    report = refine_claims(
+        targets, provider=provider, model=args.model,
+        existing_claim_ids=existing_claim_ids,
+    )
+    print(f"  refined: {report.claims_refined}")
+    print(f"  invalid model output rejected: {report.claims_rejected_invalid}")
+    print(f"  accepted: {report.proposals_accepted} | needs_review: {report.proposals_needs_review} | rejected: {report.proposals_rejected}")
+    if report.errors:
+        print(f"  errors: {len(report.errors)}")
+        for e in report.errors[:3]:
+            print(f"    - {e[:120]}")
+
+    # Persist MODEL_INVOKED ledger events
+    for event in report.inference_events:
+        await store.put_ledger_event(event)
+    print(f"  ledger events: {len(report.inference_events)}")
+
+    # Relationship proposals
+    if args.relationships:
+        texts = [{"source_id": s.id, "text": s.text[:2000]} for s in sources[:10]]
+        print(f"\nProposing relationships from {len(texts)} sources...")
+        rel_report = propose_relationships(texts, provider=provider, model=args.model)
+        print(f"  proposed: {rel_report.relationships_proposed}")
+        print(f"  invalid rejected: {rel_report.relationships_rejected_invalid}")
+        print(f"  accepted: {rel_report.proposals_accepted} | needs_review: {rel_report.proposals_needs_review} | rejected: {rel_report.proposals_rejected}")
+        for event in rel_report.inference_events:
+            await store.put_ledger_event(event)
+        print(f"  ledger events: {len(rel_report.inference_events)}")
+        if rel_report.errors:
+            print(f"  errors: {len(rel_report.errors)}")
 
 
 if __name__ == "__main__":
