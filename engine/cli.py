@@ -39,6 +39,10 @@ def main():
     investigate_parser = subparsers.add_parser("investigate", help="Run investigation loop")
     investigate_parser.add_argument("--max-investigations", type=int, default=10, help="Max investigations to create")
 
+    # agents
+    agents_parser = subparsers.add_parser("agents", help="Run agent pipeline")
+    agents_parser.add_argument("--agent", action="append", help="Specific agent to run (default: all)")
+
     # explain
     explain_parser = subparsers.add_parser("explain", help="Explain a claim")
     explain_parser.add_argument("claim_id", help="Claim ID")
@@ -79,6 +83,8 @@ def main():
         asyncio.run(_cmd_refine(args))
     elif args.command == "investigate":
         asyncio.run(_cmd_investigate(args))
+    elif args.command == "agents":
+        asyncio.run(_cmd_agents(args))
     else:
         parser.print_help()
         sys.exit(1)
@@ -385,6 +391,60 @@ async def _cmd_investigate(args):
     print(f"\n{'=' * 60}")
     print(f"Total: {len(plans)} investigation(s) proposed")
     print(f"Run 'ganymede investigate --max-investigations N' to adjust queue size")
+
+
+async def _cmd_agents(args):
+    """Run agent pipeline — agents propose, policy evaluates."""
+    from agents import AgentRunner
+    from .database import create_tables, get_session
+    from sqlalchemy import select
+    from .database import ClaimRecord, EvidenceUnitRecord, SourceRecord, ContradictionRecord, InvestigationRecord
+
+    await create_tables()
+
+    async with get_session() as session:
+        claims = [_row_to_dict(r) for r in (await session.execute(select(ClaimRecord))).scalars().all()]
+        evidence = [_row_to_dict(r) for r in (await session.execute(select(EvidenceUnitRecord))).scalars().all()]
+        sources = [_row_to_dict(r) for r in (await session.execute(select(SourceRecord))).scalars().all()]
+        contradictions = [_row_to_dict(r) for r in (await session.execute(select(ContradictionRecord))).scalars().all()]
+        investigations = [_row_to_dict(r) for r in (await session.execute(select(InvestigationRecord))).scalars().all()]
+
+    runner = AgentRunner()
+
+    agent_ids = args.agent or None
+
+    result = await runner.run_pipeline(
+        claims=claims,
+        evidence=evidence,
+        sources=sources,
+        contradictions=contradictions,
+        investigations=investigations,
+        context={"corpus_dir": "corpus/sources"},
+        agent_ids=agent_ids,
+    )
+
+    print(f"\nAgent Pipeline — {result['agents_run']} agent(s) ran")
+    print("=" * 60)
+    print(f"  Total proposals: {result['total_proposals']}")
+    print(f"  Accepted:        {result['accepted']}")
+    print(f"  Rejected:        {result['rejected']}")
+    print(f"  Needs review:    {result['needs_review']}")
+
+    if result["by_agent"]:
+        print(f"\n  By agent:")
+        for agent_id, summary in result["by_agent"].items():
+            print(f"    {agent_id:25s} P={summary['proposals']} A={summary['accepted']} R={summary['rejected']} N={summary['needs_review']}")
+
+    # Print proposals that need review
+    needs_review = [r for r in runner.results if r["decision"].outcome == "needs_review"]
+    if needs_review:
+        print(f"\n  Proposals needing review:")
+        for nr in needs_review:
+            p = nr["proposal"]
+            d = nr["decision"]
+            print(f"    [{p.agent_id}] {p.operation}: {d.reason[:80]}")
+
+    print(f"\n{'=' * 60}")
 
 
 if __name__ == "__main__":
