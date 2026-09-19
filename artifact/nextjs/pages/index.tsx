@@ -145,7 +145,7 @@ function NarrativeView({ index }: { index: ArtifactIndex }) {
       <Head><title>Ganymede — Narrative</title></Head>
       <h1 style={{ marginTop: 0 }}>Narrative</h1>
       <p style={{ color: "#a1a1aa", maxWidth: 800 }}>
-        What the corpus establishes — claims with SUPPORTED or VALIDATED status, ordered by confidence.
+        What the corpus establishes — claims with SUPPORTED or VALIDATED status. Human voices (user turns, post authors) lead; assistant and system boilerplate ranks below.
         Top {narrative.length} of {index.counts.claims.toLocaleString()} total claims.
       </p>
       <div style={{ marginTop: 24 }}>
@@ -176,6 +176,7 @@ function NarrativeView({ index }: { index: ArtifactIndex }) {
 function ClaimsView({ index }: { index: ArtifactIndex }) {
   const { items: claims, error } = useShards(index, "claims");
   const [filter, setFilter] = useState("all");
+  const [speakerFilter, setSpeakerFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
 
@@ -183,12 +184,19 @@ function ClaimsView({ index }: { index: ArtifactIndex }) {
     if (!claims) return [];
     return claims.filter((c: any) => {
       if (filter !== "all" && c.status !== filter) return false;
+      if (speakerFilter !== "all") {
+        const sp = c.speakers || {};
+        const human = (sp.user || 0) + (sp.author || 0);
+        const machine = (sp.assistant || 0) + (sp.system || 0);
+        if (speakerFilter === "human" && human === 0) return false;
+        if (speakerFilter === "assistant" && machine === 0) return false;
+      }
       if (search && !c.text.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [claims, filter, search]);
+  }, [claims, filter, speakerFilter, search]);
 
-  useEffect(() => setPage(0), [filter, search]);
+  useEffect(() => setPage(0), [filter, speakerFilter, search]);
 
   if (error) return <div className="loading">Error loading claims: {error}</div>;
   if (!claims) return <div className="loading">Loading {index.counts.claims.toLocaleString()} claims…</div>;
@@ -219,6 +227,15 @@ function ClaimsView({ index }: { index: ArtifactIndex }) {
           {Object.keys(index.status_counts).map((s) => (
             <option key={s} value={s}>{s} ({index.status_counts[s]})</option>
           ))}
+        </select>
+        <select
+          value={speakerFilter}
+          onChange={(e) => setSpeakerFilter(e.target.value)}
+          style={{ padding: "8px 12px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--foreground)", fontSize: 14 }}
+        >
+          <option value="all">All voices</option>
+          <option value="human">Human (user / author)</option>
+          <option value="assistant">Assistant / system</option>
         </select>
         <span style={{ fontSize: 12, color: "#71717a" }}>{filtered.length.toLocaleString()} matches</span>
       </div>
@@ -585,6 +602,11 @@ function ClaimDetail({ index, id }: { index: ArtifactIndex; id: string }) {
         <span style={{ fontSize: 14, color: "#71717a" }}>
           evidence: <strong>{(claim.evidence_ids || []).length}</strong>
         </span>
+        {claim.speakers && Object.keys(claim.speakers).length > 0 && (
+          <span style={{ fontSize: 12, color: "#71717a" }}>
+            voices: {Object.entries(claim.speakers).map(([k, v]) => `${k} ×${v}`).join(", ")}
+          </span>
+        )}
         <ConfidenceBar confidence={claim.confidence} />
       </div>
 
@@ -602,6 +624,7 @@ function ClaimDetail({ index, id }: { index: ArtifactIndex; id: string }) {
         <div key={e.id} className="card">
           <p style={{ margin: 0, fontStyle: "italic", color: "#a1a1aa" }}>"{e.quote}"</p>
           <div style={{ marginTop: 6, fontSize: 12, color: "#71717a" }}>
+            {e.speaker && <span style={{ color: e.speaker === "user" || e.speaker === "author" ? "#34d399" : "#71717a" }}>{e.speaker} | </span>}
             stance: {e.stance}
             {e.timestamp ? ` | ${new Date(e.timestamp * 1000).toISOString().slice(0, 10)}` : ""}
             {e.author ? ` | ${e.author}` : ""} | source:{" "}

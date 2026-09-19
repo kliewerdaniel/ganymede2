@@ -104,6 +104,38 @@ def hedged(sentence: str) -> bool:
     return any(f" {h} " in f" {low} " for h in HEDGES)
 
 
+# Speaker markers as emitted by the conversation-export formatter.
+# Order matters only for readability; matching is exact-prefix.
+_SPEAKER_MARKERS = [
+    ("### 👤 User", "user"),
+    ("### 🤖 Assistant", "assistant"),
+    ("### ⚙️ System", "system"),
+    ("### System", "system"),
+    ("### User", "user"),
+    ("### Assistant", "assistant"),
+]
+
+
+def speaker_at(text: str, offset: int, source_type: str = "conversation") -> Optional[str]:
+    """Deterministically derive the speaker for a span at ``offset``.
+
+    Conversations carry ``### 👤 User`` / ``### 🤖 Assistant`` headers in the
+    canonical text; the speaker of a span is the last header at or before it.
+    Posts (Reddit) have a single author — the source's own. Returns None when
+    no marker precedes the offset (e.g. the file header before turn 1).
+    """
+    if source_type == "post":
+        return "author"
+    if source_type != "conversation":
+        return None
+    best = None
+    for marker, speaker in _SPEAKER_MARKERS:
+        idx = text.rfind(marker, 0, offset + 1)
+        if idx >= 0 and (best is None or idx > best[0]):
+            best = (idx, speaker)
+    return best[1] if best else None
+
+
 def extract_entities(text: str, vocabulary: Optional[Sequence[str]] = None) -> Dict[str, int]:
     counts: Dict[str, int] = {}
 
@@ -194,6 +226,7 @@ def extract_source(
             "source_id": sid,
             "domain": domain,
             "author": author,
+            "speaker": speaker_at(text, offset, source.get("type", "document")),
             "stance": stance_of(sent),
             "quote": sent[:400],
             "offset": offset,

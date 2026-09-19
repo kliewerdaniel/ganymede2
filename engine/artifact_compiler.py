@@ -49,12 +49,25 @@ class ArtifactCompiler:
         self.investigations = investigations or []
         self.sources = sources or []
 
+    def _speaker_tallies(self) -> Dict[str, Dict[str, int]]:
+        """Claim ID -> {speaker: evidence count}, from the evidence records."""
+        tallies: Dict[str, Dict[str, int]] = {}
+        for e in self.evidence:
+            cid = e.get("claim_id")
+            speaker = e.get("speaker")
+            if not cid or not speaker:
+                continue
+            tallies.setdefault(cid, {})
+            tallies[cid][speaker] = tallies[cid].get(speaker, 0) + 1
+        return tallies
+
     def compile(self) -> ArtifactIR:
         """Compile the full Artifact IR."""
         start = time.time()
 
         # Build export objects
-        claim_exports = [self._build_claim(c) for c in self.claims]
+        tallies = self._speaker_tallies()
+        claim_exports = [self._build_claim(c, tallies) for c in self.claims]
         evidence_exports = [self._build_evidence(e) for e in self.evidence]
         entity_exports = [self._build_entity(e) for e in self.entities]
         contradiction_exports = [self._build_contradiction(c) for c in self.contradictions]
@@ -92,7 +105,7 @@ class ArtifactCompiler:
             intermediates=intermediates,
         )
 
-    def _build_claim(self, claim: Dict[str, Any]) -> ClaimExport:
+    def _build_claim(self, claim: Dict[str, Any], speaker_tallies: Optional[Dict[str, Dict[str, int]]] = None) -> ClaimExport:
         return ClaimExport(
             id=claim["id"],
             text=claim["text"],
@@ -106,6 +119,7 @@ class ArtifactCompiler:
             contradiction_ids=claim.get("contradiction_ids", []),
             derived_from=claim.get("derived_from", []),
             history=claim.get("history", []),
+            speakers=(speaker_tallies or {}).get(claim["id"], {}),
             compiler_version=claim.get("compiler_version", "0.1.0"),
             policy_version=claim.get("policy_version", "0.1.0"),
         )
@@ -116,6 +130,7 @@ class ArtifactCompiler:
             source_id=evidence["source_id"],
             structural_unit_id=evidence.get("structural_unit_id"),
             claim_id=evidence.get("claim_id"),
+            speaker=evidence.get("speaker"),
             domain=evidence.get("domain"),
             author=evidence.get("author"),
             stance=evidence.get("stance", "support"),
@@ -189,17 +204,25 @@ class ArtifactCompiler:
         sources: List[SourceExport],
     ) -> ViewIndex:
         """Pre-compute view data."""
-        # Narrative: SUPPORTED/VALIDATED claims ordered by confidence
+        # Narrative: SUPPORTED/VALIDATED claims — human-grounded first, then
+        # by confidence (assistant/system boilerplate ranks below).
+        def _human_share(c: ClaimExport) -> float:
+            if not c.speakers:
+                return 0.0
+            human = c.speakers.get("user", 0) + c.speakers.get("author", 0)
+            return human / sum(c.speakers.values())
+
         narrative_claims = [
             c for c in claims if c.status in ("SUPPORTED", "VALIDATED")
         ]
-        narrative_claims.sort(key=lambda c: c.confidence, reverse=True)
+        narrative_claims.sort(key=lambda c: (-_human_share(c), -c.confidence, c.id))
         narrative = [
             {
                 "claim_id": c.id,
                 "text": c.text,
                 "confidence": c.confidence,
                 "evidence_ids": c.evidence_ids,
+                "speakers": c.speakers,
             }
             for c in narrative_claims
         ]
@@ -582,7 +605,8 @@ class ArtifactCompiler:
         data_dir = output_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        claim_exports = [self._build_claim(c) for c in self.claims]
+        tallies = self._speaker_tallies()
+        claim_exports = [self._build_claim(c, tallies) for c in self.claims]
         evidence_exports = [self._build_evidence(e) for e in self.evidence]
         entity_exports = [self._build_entity(e) for e in self.entities]
         contradiction_exports = [self._build_contradiction(c) for c in self.contradictions]
@@ -628,6 +652,20 @@ class ArtifactCompiler:
 
         # Capped view summaries for the index (full data lives in shards)
         NARRATIVE_CAP = 500
+        # Narrative ordering policy: claims grounded in HUMAN speech lead the
+        # narrative. A claim is human-grounded when any of its evidence comes
+        # from a user turn or a post author; assistant/system boilerplate
+        # (e.g. ChatGPT system messages) ranks below, however corroborated.
+        # Within each tier, order by confidence, then claim ID for determinism.
+        def human_share(c: ClaimExport) -> float:
+            if not c.speakers:
+                return 0.0
+            human = c.speakers.get("user", 0) + c.speakers.get("author", 0)
+            return human / sum(c.speakers.values())
+
+        def narrative_key(c: ClaimExport):
+            return (-human_share(c), -c.confidence, c.id)
+
         narrative_summary = [
             {
                 "claim_id": c.id,
@@ -635,11 +673,11 @@ class ArtifactCompiler:
                 "status": c.status,
                 "confidence": c.confidence,
                 "evidence_count": len(c.evidence_ids),
+                "speakers": c.speakers,
             }
             for c in sorted(
                 (c for c in claim_exports if c.status in ("SUPPORTED", "VALIDATED")),
-                key=lambda c: c.confidence,
-                reverse=True,
+                key=narrative_key,
             )[:NARRATIVE_CAP]
         ]
 

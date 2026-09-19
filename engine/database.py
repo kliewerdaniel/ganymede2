@@ -196,6 +196,7 @@ class EvidenceUnitRecord(Base):
     source_id = Column(String(64), ForeignKey("sources.id"), nullable=False)
     structural_unit_id = Column(String(64), ForeignKey("structural_units.id"), nullable=True)
     claim_id = Column(String(64), ForeignKey("claims.id"), nullable=True)  # filled in Stage 6
+    speaker = Column(String(16), nullable=True)  # user, assistant, system, author
     domain = Column(String(256), nullable=True)
     author = Column(String(256), nullable=True)
     stance = Column(String(16), nullable=False, default="support")  # support, contradict

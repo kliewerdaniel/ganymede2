@@ -33,6 +33,7 @@ class ClaimExport:
     contradiction_ids: List[str] = field(default_factory=list)
     derived_from: List[str] = field(default_factory=list)
     history: List[Dict[str, Any]] = field(default_factory=list)
+    speakers: Dict[str, int] = field(default_factory=dict)  # speaker -> evidence count
     compiler_version: str = "0.1.0"
     policy_version: str = "0.1.0"
 
@@ -43,6 +44,7 @@ class EvidenceExport:
     source_id: str
     structural_unit_id: Optional[str] = None
     claim_id: Optional[str] = None
+    speaker: Optional[str] = None
     domain: Optional[str] = None
     author: Optional[str] = None
     stance: str = "support"
