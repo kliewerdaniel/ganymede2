@@ -139,76 +139,55 @@ async def _cmd_artifact_build(args):
         contradictions = [_row_to_dict(r) for r in (await session.execute(select(ContradictionRecord))).scalars().all()]
         investigations = [_row_to_dict(r) for r in (await session.execute(select(InvestigationRecord))).scalars().all()]
 
+    # Entities live in the Evidence Graph store
+    from .store_evidence import EvidenceGraphStore
+    evidence_store = EvidenceGraphStore()
+    entities = await evidence_store.get_entities(limit=5000)
+
     # Build artifact IR
     compiler = ArtifactCompiler(
         claims=claims,
         evidence=evidence,
+        entities=entities,
         sources=sources,
         contradictions=contradictions,
         investigations=investigations,
     )
-    ir = compiler.compile()
 
-    # Write JSON
-    ir_path = output_dir / "artifact.json"
-    ir_path.write_text(ir.to_json())
-    print(f"Artifact IR written to {ir_path}")
-
-    # Write intermediates
-    inter = ir.intermediates
-
-    kg_path = output_dir / "knowledge_graph.json"
-    kg_path.write_text(json.dumps(inter.knowledge_graph, indent=2, default=str))
-    print(f"Knowledge graph written to {kg_path}")
-
-    narrative_path = output_dir / "narrative.md"
-    narrative_path.write_text(inter.narrative_document)
-    print(f"Narrative document written to {narrative_path}")
-
-    facts_path = output_dir / "established_facts.json"
-    facts_path.write_text(json.dumps(inter.established_facts, indent=2, default=str))
-    print(f"Established facts written to {facts_path}")
-
-    timeline_path = output_dir / "timeline.json"
-    timeline_path.write_text(json.dumps(inter.timeline, indent=2, default=str))
-    print(f"Timeline written to {timeline_path}")
-
-    cr_path = output_dir / "contradiction_report.md"
-    cr_path.write_text(inter.contradiction_report)
-    print(f"Contradiction report written to {cr_path}")
-
-    si_path = output_dir / "source_inventory.json"
-    si_path.write_text(json.dumps(inter.source_inventory, indent=2, default=str))
-    print(f"Source inventory written to {si_path}")
-
-    # Character dossiers
-    for entity_id, dossier in inter.character_dossiers.items():
-        dossier_path = output_dir / f"dossier_{entity_id}.json"
-        dossier_path.write_text(json.dumps(dossier, indent=2, default=str))
-
-    print(f"\nArtifact build complete. Fingerprint: {ir.corpus_fingerprint}")
+    # Scale-safe sharded artifact: small index + data/ shards
+    summary = compiler.write_sharded_artifact(output_dir)
+    print(json.dumps(summary, indent=2, default=str))
+    print(f"\nSharded artifact written to {output_dir}")
+    print(f"Fingerprint: {summary['fingerprint']}")
 
     # Also copy to Next.js public directory
     nextjs_public = Path(args.output).resolve().parent / "artifact" / "nextjs" / "public"
     if nextjs_public.exists():
-        shutil.copy2(ir_path, nextjs_public / "artifact.json")
-        # Copy intermediates
-        for name in ["knowledge_graph.json", "narrative.md", "established_facts.json",
-                     "timeline.json", "contradiction_report.md", "source_inventory.json"]:
-            src = output_dir / name
-            if src.exists():
-                shutil.copy2(src, nextjs_public / name)
+        import shutil
+        shutil.copytree(output_dir, nextjs_public, dirs_exist_ok=True)
         print(f"Copied to {nextjs_public}")
     else:
         print(f"Note: {nextjs_public} not found. Run from project root.")
 
 
 def _row_to_dict(row) -> dict:
-    """Convert a SQLAlchemy row to a dict."""
+    """Convert a SQLAlchemy row to a dict keyed by SQL column name.
+
+    The class attribute name can differ from the SQL column name (e.g. the
+    SQL column ``metadata`` is mapped to the attribute ``metadata_json``).
+    ``Column.key`` defaults to the SQL name, so ``getattr(row, col.key)``
+    resolves ``metadata`` to SQLAlchemy's class-level ``MetaData`` object —
+    which json.dumps rejects as a circular reference. Walk
+    ``mapper.column_attrs`` instead: each entry carries the true attribute
+    key alongside its column.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    mapper = sa_inspect(row.__class__)
     result = {}
-    for col in row.__table__.columns:
-        val = getattr(row, col.name)
-        result[col.name] = val
+    for attr in mapper.column_attrs:
+        col = attr.columns[0]
+        result[col.name] = getattr(row, attr.key)
     return result
 
 

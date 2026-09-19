@@ -66,6 +66,11 @@ def mine_contradictions(
             continue
         if word in GENERIC:
             continue
+        # Scale guard: a word shared by thousands of claims (e.g. a person's
+        # name across a large corpus) yields O(n²) pairs. Skip such groups —
+        # a contradiction needs topical overlap, not a single common token.
+        if len(group) > 200:
+            continue
         for i, a in enumerate(group):
             for b in group[i + 1:]:
                 if len(out) > 400:

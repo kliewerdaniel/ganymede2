@@ -80,22 +80,36 @@ class Compiler:
     # ------------------------------------------------------------------
 
     async def compile_sources(self, sources: List[Dict], cycle: int = 0) -> CompileReport:
-        """Compile a list of source records through the full pipeline."""
+        """Compile a list of source records through the full pipeline.
+
+        Large corpora are processed in batches: each batch runs the full
+        stage 1-6 pipeline (including contradiction mining within the batch),
+        so DB commits happen regularly instead of once at the end.
+        """
         import asyncio
         report = CompileReport(cycle=cycle, mode="full")
         start = time.time()
 
         report.sources_seen = len(sources)
 
+        BATCH = 25
+        for batch_start in range(0, len(sources), BATCH):
+            batch = sources[batch_start:batch_start + BATCH]
+            await self._compile_batch(batch, report)
+
+        report.seconds = time.time() - start
+        return report
+
+    async def _compile_batch(self, sources: List[Dict], report: CompileReport) -> None:
+        """Run stages 2-6 for one batch of already-acquired sources."""
         all_extractions = []
         for source in sources:
             try:
                 new_id = await self.evidence_store.put_source(source)
-                if new_id is None:
-                    # Source was cached — still process structural units + evidence
-                    pass
-                else:
+                if new_id is not None:
                     report.sources_extracted += 1
+                else:
+                    report.sources_cached += 1
 
                 # Stage 3: Structural parsing
                 units = canon.structural_parse(source)
@@ -119,21 +133,21 @@ class Compiler:
             await self._build_claim_graph(all_extractions, report)
 
         # Stage 6b: Persist evidence units (after claims exist for FK integrity)
-        if all_extractions:
-            for extraction in all_extractions:
-                for ev in extraction.evidence:
-                    ev_record = {
-                        **ev,
-                        "claim_id": None,  # FK to claims — linked via claim.evidence_ids
-                        "source_id": extraction.source_id,
-                        "parser_version": "1.0.0",
-                        "source_checksum": extraction.source_checksum,
-                    }
-                    await self.evidence_store.put_evidence_unit(ev_record)
-                    report.evidence_units += 1
+        for extraction in all_extractions:
+            for ev in extraction.evidence:
+                ev_record = {
+                    **ev,
+                    "source_id": extraction.source_id,
+                    "parser_version": "1.0.0",
+                    "source_checksum": extraction.source_checksum,
+                }
+                await self.evidence_store.put_evidence_unit(ev_record)
+                report.evidence_units += 1
 
-        report.seconds = time.time() - start
-        return report
+        # Stage 6c: Persist extracted entities (accumulate mentions/sources)
+        for extraction in all_extractions:
+            for ent in extraction.entities:
+                await self.evidence_store.put_entity(ent)
 
     async def compile_corpus_dir(self, corpus_dir: str, cycle: int = 0) -> CompileReport:
         """Compile all source files in a directory."""
@@ -171,21 +185,24 @@ class Compiler:
     # ------------------------------------------------------------------
 
     def _acquire_corpus(self, corpus_dir: str) -> List[Dict]:
-        """Read all source files from a directory."""
+        """Read all source files from a directory (recursively)."""
         sources = []
         corpus_path = Path(corpus_dir)
         if not corpus_path.exists():
             return sources
 
-        for file_path in corpus_path.iterdir():
-            if file_path.is_file() and not file_path.name.startswith("."):
-                try:
-                    source = canon.read_source_file(file_path)
-                    if source:
-                        sources.append(source)
-                except Exception as e:
-                    # Visible failure — never silently skip
-                    print(f"WARNING: failed to read {file_path}: {e}")
+        for file_path in sorted(corpus_path.rglob("*")):
+            if not file_path.is_file() or file_path.name.startswith("."):
+                continue
+            if file_path.suffix.lower() not in (".md", ".txt", ".json"):
+                continue
+            try:
+                source = canon.read_source_file(file_path)
+                if source:
+                    sources.append(source)
+            except Exception as e:
+                # Visible failure — never silently skip
+                print(f"WARNING: failed to read {file_path}: {e}")
         return sources
 
     # ------------------------------------------------------------------
@@ -193,7 +210,12 @@ class Compiler:
     # ------------------------------------------------------------------
 
     async def _build_claim_graph(self, extractions: List, report: CompileReport):
-        """Merge extractions, detect contradictions, score, and store claims."""
+        """Merge extractions, detect contradictions, score, and store claims.
+
+        Claims that already exist in the Epistemic Graph (from earlier batches
+        or cycles) are re-scored with their full accumulated evidence, so
+        corroboration and independence terms work across ingestion batches.
+        """
         import asyncio
 
         # Merge all extractions
@@ -201,26 +223,48 @@ class Compiler:
 
         # Detect contradictions
         contradictions = mine_contradictions(merged["claims"])
-        report.contradictions_detected = len(contradictions)
+        report.contradictions_detected += len(contradictions)
+
+        # Pre-fetch existing evidence for batch claims that may already exist
+        existing_evidence: Dict[str, List[Dict]] = {}
+        existing_claim_rows: Dict[str, Optional[Dict]] = {}
+        for claim in merged["claims"]:
+            cid = claim["id"]
+            prior = await self.evidence_store.get_evidence_for_claim(cid)
+            if prior:
+                existing_evidence[cid] = prior
+                existing_claim_rows[cid] = await self.epistemic_store.get_claim(cid)
 
         # Score and store claims
         for claim in merged["claims"]:
             claim_id = claim["id"]
 
-            # Gather evidence refs for this claim
+            # Gather evidence refs for this claim: batch evidence + any
+            # evidence persisted by earlier batches (deduplicated by id).
+            batch_ev = [
+                ev for ev in merged["evidence"] if ev.get("claim_id") == claim_id
+            ]
+            prior_ev = existing_evidence.get(claim_id, [])
+            seen_ev_ids = set()
+            all_ev: List[Dict] = []
+            for ev in batch_ev + prior_ev:
+                if ev["id"] in seen_ev_ids:
+                    continue
+                seen_ev_ids.add(ev["id"])
+                all_ev.append(ev)
+
             evidence_refs = [
                 EvidenceRef(
                     evidence_id=ev["id"],
                     source_id=ev["source_id"],
-                    domain=ev.get("domain", ""),
-                    author=ev.get("author", ""),
+                    domain=ev.get("domain") or "",
+                    author=ev.get("author") or "",
                     stance=ev.get("stance", "support"),
                     reliability=ev.get("reliability"),
                     timestamp=ev.get("timestamp"),
                     quote=ev.get("quote", ""),
                 )
-                for ev in merged["evidence"]
-                if ev.get("claim_id") == claim_id
+                for ev in all_ev
             ]
 
             # Score the claim
@@ -233,6 +277,30 @@ class Compiler:
                 has_contradictions=claim_id in [c["claim_a_id"] for c in contradictions] + [c["claim_b_id"] for c in contradictions],
             )
 
+            # Union sources/entities with any prior record for this claim
+            prior_row = existing_claim_rows.get(claim_id) or {}
+            merged_source_ids = list(
+                dict.fromkeys(
+                    (prior_row.get("source_ids") or [])
+                    + claim.get("source_ids", [])
+                )
+            )
+            merged_entity_ids = list(
+                dict.fromkeys(
+                    (prior_row.get("entity_ids") or [])
+                    + claim.get("entity_ids", [])
+                )
+            )
+            merged_contra_ids = list(
+                dict.fromkeys(
+                    (prior_row.get("contradiction_ids") or [])
+                    + [
+                        c["id"] for c in contradictions
+                        if c["claim_a_id"] == claim_id or c["claim_b_id"] == claim_id
+                    ]
+                )
+            )
+
             # Store the claim
             claim_record = {
                 "id": claim_id,
@@ -242,12 +310,9 @@ class Compiler:
                 "confidence": score_result.score,
                 "confidence_terms": score_result.terms,
                 "evidence_ids": [er.evidence_id for er in evidence_refs],
-                "source_ids": claim.get("source_ids", []),
-                "entity_ids": claim.get("entity_ids", []),
-                "contradiction_ids": [
-                    c["id"] for c in contradictions
-                    if c["claim_a_id"] == claim_id or c["claim_b_id"] == claim_id
-                ],
+                "source_ids": merged_source_ids,
+                "entity_ids": merged_entity_ids,
+                "contradiction_ids": merged_contra_ids,
                 "derived_from": claim.get("derived_from", []),
                 "compiler_version": COMPILER_VERSION,
                 "policy_version": POLICY_VERSION,

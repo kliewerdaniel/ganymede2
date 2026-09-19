@@ -19,9 +19,9 @@ The output is not a chatbot. It's a **compiled static artifact** — a website y
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  EXPOSED: Next.js static export (Vercel)                    │
-│  11 views · 32 static pages · 82 kB first-load JS           │
+│  11 views · sharded data · ~86 kB first-load JS             │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ compiled artifact (JSON IR)
+                           │ compiled artifact (index + data/ shards)
 ┌──────────────────────────▼──────────────────────────────────┐
 │  EPISTEMIC ENGINE (local)                                   │
 │  ┌─────────────────────┐  ┌──────────────────────────────┐  │
@@ -213,6 +213,12 @@ DATABASE_URL=postgresql+asyncpg://ganymede:ganymede@localhost:5432/ganymede \
 ## Status
 
 Phases 1–11 complete. All 11 ADRs implemented. 108/108 tests passing. Static artifact builds and deploys to Vercel.
+
+**First full corpus ingested (Sept 2026):** the Chris corpus — 4,865 sources (2,011 ChatGPT conversations, 2023–2026, plus 2,854 Reddit comments/submissions under the KonradFreeman identity), compiled through the full 6-stage pipeline into a claim graph with frontmatter-derived provenance (author, timestamp, permalink) on every evidence unit. The reconstruction is a **model**, never canonical — see the corpus privacy note below.
+
+## Corpus privacy
+
+The deployed artifact is generated from personal primary sources (a late brother's conversations and public posts). It is published deliberately, as an act of remembrance, with the family's intent — not scraped or synthetic. The raw corpus stays local; only the compiled claim graph is exposed.
 
 ## License
 

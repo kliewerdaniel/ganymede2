@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from .database import (
     ContradictionRecord,
+    EntityRecord,
     EvidenceUnitRecord,
     SourceRecord,
     StructuralUnitRecord,
@@ -311,12 +312,67 @@ class EvidenceGraphStore:
                     ContradictionRecord.id == record["id"]
                 )
             )
-            if existing.scalar() == record["content_hash"]:
+            if existing.scalar() is not None:
+                # Same contradiction id (same claim pair) already persisted —
+                # idempotent no-op regardless of content_hash drift from
+                # created_at/updated_at in the hash input.
                 return None
 
             obj = _contradiction_from_dict(record)
             session.add(obj)
             return record["id"]
+
+    # ------------------------------------------------------------------
+    # Entities
+    # ------------------------------------------------------------------
+
+    async def put_entity(self, entity: Dict[str, Any]) -> Optional[str]:
+        """Upsert an entity: accumulate mentions and source_ids."""
+        now = time.time()
+        async with get_session() as session:
+            result = await session.execute(
+                select(EntityRecord).where(EntityRecord.id == entity["id"])
+            )
+            record = result.scalar()
+            if record:
+                record.mentions += entity.get("mentions", 0)
+                existing_sources = set(record.source_ids or [])
+                for sid in entity.get("sources", []):
+                    existing_sources.add(sid)
+                record.source_ids = sorted(existing_sources)
+                record.updated_at = now
+                return None
+            session.add(EntityRecord(
+                id=entity["id"],
+                label=entity.get("label", ""),
+                normalized=entity.get("label", "").lower(),
+                mentions=entity.get("mentions", 0),
+                source_ids=entity.get("sources", []),
+                created_at=now,
+                updated_at=now,
+            ))
+            return entity["id"]
+
+    async def get_entities(self, *, min_mentions: int = 0, limit: int = 5000) -> List[Dict]:
+        """Top entities by mention count."""
+        async with get_session() as session:
+            result = await session.execute(
+                select(EntityRecord)
+                .where(EntityRecord.mentions >= min_mentions)
+                .order_by(EntityRecord.mentions.desc())
+                .limit(limit)
+            )
+            return [
+                {
+                    "id": r.id,
+                    "name": r.label,
+                    "normalized": r.normalized,
+                    "mentions": r.mentions,
+                    "entity_type": "unknown",
+                    "source_ids": r.source_ids or [],
+                }
+                for r in result.scalars()
+            ]
 
     # ------------------------------------------------------------------
     # Internal

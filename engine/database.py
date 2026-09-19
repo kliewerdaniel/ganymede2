@@ -171,6 +171,23 @@ class StructuralUnitRecord(Base):
     )
 
 
+class EntityRecord(Base):
+    """An entity extracted from the corpus (person, place, project, etc.)."""
+    __tablename__ = "entities"
+
+    id = Column(String(64), primary_key=True)  # ent-<sha256>
+    label = Column(Text, nullable=False)
+    normalized = Column(Text, nullable=False)
+    mentions = Column(Integer, nullable=False, default=0)
+    source_ids = Column(JSONB, nullable=False, default=list)
+    created_at = Column(Float, nullable=False)
+    updated_at = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("idx_entities_mentions", "mentions"),
+    )
+
+
 class EvidenceUnitRecord(Base):
     """The smallest provenance-bearing object. Bridge between Evidence and Epistemic graphs."""
     __tablename__ = "evidence_units"

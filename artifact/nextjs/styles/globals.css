@@ -113,3 +113,21 @@ td {
 tr:hover td {
   background: rgba(255, 255, 255, 0.02);
 }
+
+/* Pagination buttons (scale rework) */
+.pager-btn {
+  padding: 6px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-size: 13px;
+  cursor: pointer;
+}
+.pager-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.pager-btn:not(:disabled):hover {
+  border-color: var(--accent);
+}

@@ -38,7 +38,14 @@ def entity_id(label: str) -> str:
 
 
 def claim_id(text: str, source_id: str) -> str:
-    return "clm-" + hashlib.sha256((normalise_entity(text) + "|" + source_id).encode()).hexdigest()[:32]
+    """Claim identity is the normalized assertion text alone.
+
+    The same sentence observed in different sources must resolve to the
+    SAME claim so that corroboration and independence terms can function.
+    source_id is accepted for signature compatibility but deliberately
+    excluded from the hash.
+    """
+    return "clm-" + hashlib.sha256(normalise_entity(text).encode()).hexdigest()[:32]
 
 
 def normalise_entity(label: str) -> str:

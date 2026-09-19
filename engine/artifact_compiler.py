@@ -2,11 +2,16 @@
 
 Phase 1: Query the Epistemic Graph and build the Artifact IR.
 Phase 2: Compile the Artifact IR into simpler intermediates.
+Phase 3 (scale): Write a sharded static artifact — a small index
+(`artifact.json`) plus prefix-sharded data files under `data/` — so a
+corpus of 10⁴-10⁵ claims remains loadable in a browser.
 """
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .artifact_ir import (
@@ -552,3 +557,138 @@ class ArtifactCompiler:
             }
 
         return dossiers
+
+    # ------------------------------------------------------------------
+    # Phase 3: sharded static artifact
+    # ------------------------------------------------------------------
+
+    def write_sharded_artifact(self, output_dir: Path, *, shard_size: int = 2000) -> Dict[str, Any]:
+        """Write a scale-safe static artifact.
+
+        Layout:
+          artifact.json          — small index: version, fingerprint, counts,
+                                   shard manifest, capped view summaries
+          data/claims-<n>.json   — full claim records, shard n
+          data/evidence-<n>.json — full evidence records, shard n
+          data/entities.json     — entity index (capped to top by mentions)
+          data/contradictions.json
+          data/sources-<n>.json  — source inventory
+          data/timeline.json     — full chronology
+          data/narrative.md      — narrative document
+
+        Returns a summary dict with counts and file sizes.
+        """
+        output_dir = Path(output_dir)
+        data_dir = output_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        claim_exports = [self._build_claim(c) for c in self.claims]
+        evidence_exports = [self._build_evidence(e) for e in self.evidence]
+        entity_exports = [self._build_entity(e) for e in self.entities]
+        contradiction_exports = [self._build_contradiction(c) for c in self.contradictions]
+        investigation_exports = [self._build_investigation(i) for i in self.investigations]
+        source_exports = [self._build_source(s) for s in self.sources]
+
+        fingerprint = compute_corpus_fingerprint(claim_exports, evidence_exports)
+
+        def shard(items: List[Any], name: str) -> List[str]:
+            files = []
+            for i in range(0, len(items), shard_size):
+                chunk = items[i : i + shard_size]
+                fname = f"{name}-{i // shard_size}.json"
+                (data_dir / fname).write_text(
+                    json.dumps(chunk, default=lambda o: o.__dict__, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                files.append(f"data/{fname}")
+            return files
+
+        claim_shards = shard(claim_exports, "claims")
+        evidence_shards = shard(evidence_exports, "evidence")
+        source_shards = shard(source_exports, "sources")
+
+        (data_dir / "entities.json").write_text(
+            json.dumps(
+                [e.__dict__ for e in entity_exports], default=str, ensure_ascii=False
+            ),
+            encoding="utf-8",
+        )
+        (data_dir / "contradictions.json").write_text(
+            json.dumps(
+                [c.__dict__ for c in contradiction_exports], default=str, ensure_ascii=False
+            ),
+            encoding="utf-8",
+        )
+        (data_dir / "timeline.json").write_text(
+            json.dumps(self._build_timeline(claim_exports, evidence_exports), default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        narrative_doc = self._build_narrative_document(claim_exports, evidence_exports)
+        (data_dir / "narrative.md").write_text(narrative_doc, encoding="utf-8")
+
+        # Capped view summaries for the index (full data lives in shards)
+        NARRATIVE_CAP = 500
+        narrative_summary = [
+            {
+                "claim_id": c.id,
+                "text": c.text,
+                "status": c.status,
+                "confidence": c.confidence,
+                "evidence_count": len(c.evidence_ids),
+            }
+            for c in sorted(
+                (c for c in claim_exports if c.status in ("SUPPORTED", "VALIDATED")),
+                key=lambda c: c.confidence,
+                reverse=True,
+            )[:NARRATIVE_CAP]
+        ]
+
+        status_counts: Dict[str, int] = {}
+        for c in claim_exports:
+            status_counts[c.status] = status_counts.get(c.status, 0) + 1
+
+        index = {
+            "version": "0.2.0",
+            "compiled_at": time.time(),
+            "compiler_version": "0.2.0",
+            "policy_version": "0.1.0",
+            "corpus_fingerprint": fingerprint,
+            "counts": {
+                "claims": len(claim_exports),
+                "evidence": len(evidence_exports),
+                "entities": len(entity_exports),
+                "contradictions": len(contradiction_exports),
+                "investigations": len(investigation_exports),
+                "sources": len(source_exports),
+            },
+            "status_counts": status_counts,
+            "shards": {
+                "claims": claim_shards,
+                "evidence": evidence_shards,
+                "sources": source_shards,
+                "entities": ["data/entities.json"],
+                "contradictions": ["data/contradictions.json"],
+                "timeline": ["data/timeline.json"],
+                "narrative": ["data/narrative.md"],
+            },
+            "views": {
+                "narrative": narrative_summary,
+            },
+            "intermediates": {
+                "contradiction_report": self._build_contradiction_report(
+                    contradiction_exports, claim_exports
+                ),
+            },
+        }
+        (output_dir / "artifact.json").write_text(
+            json.dumps(index, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        return {
+            "counts": index["counts"],
+            "status_counts": status_counts,
+            "claim_shards": len(claim_shards),
+            "evidence_shards": len(evidence_shards),
+            "fingerprint": fingerprint,
+        }
