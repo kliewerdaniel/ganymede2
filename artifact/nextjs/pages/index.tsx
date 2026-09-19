@@ -160,6 +160,11 @@ function NarrativeView({ index }: { index: ArtifactIndex }) {
                 </a>
                 <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 12 }}>
                   <StatusBadge status={entry.status} />
+                  {entry.voice_class && (
+                    <span style={{ fontSize: 11, color: entry.voice_class === "personal" ? "#34d399" : "#71717a", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 8px" }}>
+                      {entry.voice_class}
+                    </span>
+                  )}
                   <span style={{ fontSize: 12, color: "#71717a" }}>confidence: {(entry.confidence * 100).toFixed(0)}%</span>
                   <span style={{ fontSize: 12, color: "#71717a" }}>evidence: {entry.evidence_count}</span>
                 </div>
@@ -605,6 +610,11 @@ function ClaimDetail({ index, id }: { index: ArtifactIndex; id: string }) {
         {claim.speakers && Object.keys(claim.speakers).length > 0 && (
           <span style={{ fontSize: 12, color: "#71717a" }}>
             voices: {Object.entries(claim.speakers).map(([k, v]) => `${k} ×${v}`).join(", ")}
+          </span>
+        )}
+        {claim.voice_class && (
+          <span style={{ fontSize: 12, color: claim.voice_class === "personal" ? "#34d399" : "#71717a", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 8px" }}>
+            {claim.voice_class}
           </span>
         )}
         <ConfidenceBar confidence={claim.confidence} />

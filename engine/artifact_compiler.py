@@ -120,6 +120,7 @@ class ArtifactCompiler:
             derived_from=claim.get("derived_from", []),
             history=claim.get("history", []),
             speakers=(speaker_tallies or {}).get(claim["id"], {}),
+            voice_class=claim.get("voice_class"),
             compiler_version=claim.get("compiler_version", "0.1.0"),
             policy_version=claim.get("policy_version", "0.1.0"),
         )
@@ -204,18 +205,23 @@ class ArtifactCompiler:
         sources: List[SourceExport],
     ) -> ViewIndex:
         """Pre-compute view data."""
-        # Narrative: SUPPORTED/VALIDATED claims — human-grounded first, then
-        # by confidence (assistant/system boilerplate ranks below).
+        # Narrative: SUPPORTED/VALIDATED claims — personal voice first, then
+        # human-grounded, then by confidence (assistant/system boilerplate last).
         def _human_share(c: ClaimExport) -> float:
             if not c.speakers:
                 return 0.0
             human = c.speakers.get("user", 0) + c.speakers.get("author", 0)
             return human / sum(c.speakers.values())
 
+        def _personal_rank(c: ClaimExport) -> int:
+            if c.voice_class == "personal":
+                return 0
+            return 1 if _human_share(c) > 0 else 2
+
         narrative_claims = [
             c for c in claims if c.status in ("SUPPORTED", "VALIDATED")
         ]
-        narrative_claims.sort(key=lambda c: (-_human_share(c), -c.confidence, c.id))
+        narrative_claims.sort(key=lambda c: (_personal_rank(c), -_human_share(c), -c.confidence, c.id))
         narrative = [
             {
                 "claim_id": c.id,
@@ -223,6 +229,7 @@ class ArtifactCompiler:
                 "confidence": c.confidence,
                 "evidence_ids": c.evidence_ids,
                 "speakers": c.speakers,
+                "voice_class": c.voice_class,
             }
             for c in narrative_claims
         ]
@@ -652,19 +659,28 @@ class ArtifactCompiler:
 
         # Capped view summaries for the index (full data lives in shards)
         NARRATIVE_CAP = 500
-        # Narrative ordering policy: claims grounded in HUMAN speech lead the
-        # narrative. A claim is human-grounded when any of its evidence comes
-        # from a user turn or a post author; assistant/system boilerplate
-        # (e.g. ChatGPT system messages) ranks below, however corroborated.
-        # Within each tier, order by confidence, then claim ID for determinism.
+        # Narrative ordering policy (deterministic given the same inputs):
+        # 1. Human-grounded claims (user/author evidence) rank above
+        #    assistant/system boilerplate, however corroborated.
+        # 2. Within the human tier, model-classified PERSONAL voice leads —
+        #    the corpus subject's own life, not prompt-engineering text.
+        #    (voice_class is model-derived and untrusted; when absent or
+        #    unclassified, claims rank by the remaining keys unchanged.)
+        # 3. Then confidence, then claim ID for total determinism.
         def human_share(c: ClaimExport) -> float:
             if not c.speakers:
                 return 0.0
             human = c.speakers.get("user", 0) + c.speakers.get("author", 0)
             return human / sum(c.speakers.values())
 
+        def personal_rank(c: ClaimExport) -> int:
+            # 0 = personal (leads), 1 = other human, 2 = machine/no-voice
+            if c.voice_class == "personal":
+                return 0
+            return 1 if human_share(c) > 0 else 2
+
         def narrative_key(c: ClaimExport):
-            return (-human_share(c), -c.confidence, c.id)
+            return (personal_rank(c), -human_share(c), -c.confidence, c.id)
 
         narrative_summary = [
             {
@@ -674,6 +690,7 @@ class ArtifactCompiler:
                 "confidence": c.confidence,
                 "evidence_count": len(c.evidence_ids),
                 "speakers": c.speakers,
+                "voice_class": c.voice_class,
             }
             for c in sorted(
                 (c for c in claim_exports if c.status in ("SUPPORTED", "VALIDATED")),

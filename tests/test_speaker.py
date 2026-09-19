@@ -137,3 +137,51 @@ class TestNarrativeOrdering:
             return (c.speakers.get("user", 0) + c.speakers.get("author", 0)) / sum(c.speakers.values())
         ranked = sorted(exports, key=lambda c: (-human_share(c), -c.confidence, c.id))
         assert [c.id for c in ranked] == ["clm-a", "clm-b"]
+
+
+class TestVoiceOrderingAndFingerprint:
+    def _claim_export(self, cid, conf, speakers, voice=None):
+        return ClaimExport(
+            id=cid, text=f"claim {cid}", normalized=cid, status="SUPPORTED",
+            confidence=conf, evidence_ids=[], speakers=speakers, voice_class=voice,
+        )
+
+    def test_personal_voice_leads(self):
+        from engine.artifact_compiler import ArtifactCompiler
+        from engine.artifact_ir import EvidenceExport
+        # prompt_engineering claim with HIGHER confidence must rank below personal
+        claims = [
+            self._claim_export("clm-pe", 0.95, {"user": 3}, "prompt_engineering"),
+            self._claim_export("clm-per", 0.40, {"user": 1}, "personal"),
+        ]
+        evidence = [
+            EvidenceExport(id="ev-0", source_id="s", claim_id="clm-pe", speaker="user", quote="q", offset=0, source_checksum="c", parser_version="1"),
+            EvidenceExport(id="ev-1", source_id="s", claim_id="clm-per", speaker="user", quote="q", offset=0, source_checksum="c", parser_version="1"),
+        ]
+        comp = ArtifactCompiler(claims=claims, evidence=evidence)
+        views = comp._build_views(claims, evidence, [], [], [], [])
+        ranked = [v["claim_id"] for v in views.narrative]
+        assert ranked == ["clm-per", "clm-pe"], f"personal must lead: {ranked}"
+
+    def test_fingerprint_order_independent(self):
+        from engine.artifact_ir import compute_corpus_fingerprint, EvidenceExport
+        c1 = self._claim_export("a", 0.5, {})
+        c2 = self._claim_export("b", 0.6, {})
+        e = EvidenceExport(id="ev-0", source_id="s", quote="q", offset=0, source_checksum="c", parser_version="1")
+        fp1 = compute_corpus_fingerprint([c1, c2], [e])
+        fp2 = compute_corpus_fingerprint([c2, c1], [e])  # reversed input order
+        assert fp1 == fp2, "fingerprint must be order-independent"
+
+    def test_fingerprint_ignores_voice_class(self):
+        from engine.artifact_ir import compute_corpus_fingerprint, EvidenceExport
+        c_a = self._claim_export("a", 0.5, {}, voice="personal")
+        c_b = self._claim_export("a", 0.5, {}, voice=None)
+        e = EvidenceExport(id="ev-0", source_id="s", quote="q", offset=0, source_checksum="c", parser_version="1")
+        assert compute_corpus_fingerprint([c_a], [e]) == compute_corpus_fingerprint([c_b], [e]), \
+            "model-derived voice_class must not change the corpus fingerprint"
+
+    def test_voices_report_shape(self):
+        from engine.refine import VoiceReport, VOICE_LABELS
+        r = VoiceReport()
+        assert r.classified == 0 and r.classifications == []
+        assert "personal" in VOICE_LABELS and "prompt_engineering" in VOICE_LABELS

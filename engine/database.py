@@ -276,6 +276,9 @@ class ClaimRecord(Base):
     derived_from = Column(JSONB, nullable=False, default=list)
     compiler_version = Column(String(16), nullable=False)
     policy_version = Column(String(16), nullable=False)
+    voice_class = Column(String(32), nullable=True)  # model-derived, untrusted annotation
+    voice_model = Column(String(64), nullable=True)
+    voice_prompt_version = Column(String(16), nullable=True)
     history = Column(JSONB, nullable=False, default=list)
     content_hash = Column(String(64), nullable=False, unique=True)
     created_at = Column(Float, nullable=False)

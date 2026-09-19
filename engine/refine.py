@@ -394,3 +394,91 @@ def propose_relationships(
 
 def _proposal_id(*parts: str) -> str:
     return "prop-" + hashlib.sha256(":".join(parts).encode()).hexdigest()[:32]
+
+
+# ---------------------------------------------------------------------------
+# Voice classification (ADR 006 Stage 5, optional model refinement)
+# ---------------------------------------------------------------------------
+
+VOICE_PROMPT_VERSION = "1.0.0"
+
+VOICE_LABELS = ["personal", "prompt_engineering", "technical", "question", "other"]
+
+VOICE_CLASSIFICATION_PROMPT = """You are classifying a sentence written by a human in a corpus of conversations and posts.
+
+The sentence is a CLAIM already extracted from the corpus. Decide which VOICE it speaks in:
+
+- personal: first-person experience, feeling, memory, opinion about life, relationships, health, grief, identity
+- prompt_engineering: instructions to an AI, prompt templates, feedback on AI responses, system-message text, few-shot examples
+- technical: programming, tools, infrastructure, math, science — discussed as subject matter
+- question: interrogative — asks rather than asserts
+- other: none of the above
+
+Reply with exactly one category name.
+
+SENTENCE: {text}"""
+
+
+@dataclass
+class VoiceClassification:
+    claim_id: str
+    voice: str
+    model: str
+    prompt_contract_version: str
+
+
+@dataclass
+class VoiceReport:
+    """Summary of one voice-classification pass."""
+    provider: str = ""
+    model: str = ""
+    classified: int = 0
+    rejected_invalid: int = 0
+    classifications: List[VoiceClassification] = field(default_factory=list)
+    inference_events: List[Dict[str, Any]] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+
+def classify_voices(
+    targets: List[Dict[str, str]],
+    *,
+    provider: Optional[InferenceProvider] = None,
+    model: str = "qwen3:8b",
+    max_targets: int = 20,
+) -> VoiceReport:
+    """Classify claims into voices via provider.classify.
+
+    Model output is UNTRUSTED: only labels in VOICE_LABELS survive. Targets
+    are (claim_id, text) dicts. The deterministic layer stands alone — no
+    provider -> empty report, no error.
+    """
+    report = VoiceReport(provider="", model=model)
+    if provider is None:
+        provider = select_provider()
+    if provider is None:
+        return report
+    report.provider = provider.name
+
+    for t in targets[:max_targets]:
+        result = provider.classify(
+            VOICE_CLASSIFICATION_PROMPT.format(text=t["text"][:MAX_REFINEMENT_CHARS]),
+            model=model,
+            labels=VOICE_LABELS,
+        )
+        report.inference_events.append(log_inference_event(
+            result, prompt_contract_version=VOICE_PROMPT_VERSION
+        ))
+        if not result.ok:
+            report.errors.append(f"claim {t['claim_id']}: {result.error}")
+            continue
+        if result.output not in VOICE_LABELS:
+            report.rejected_invalid += 1
+            continue
+        report.classifications.append(VoiceClassification(
+            claim_id=t["claim_id"],
+            voice=str(result.output),
+            model=model,
+            prompt_contract_version=VOICE_PROMPT_VERSION,
+        ))
+    report.classified = len(report.classifications)
+    return report

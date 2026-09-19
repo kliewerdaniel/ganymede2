@@ -34,6 +34,7 @@ class ClaimExport:
     derived_from: List[str] = field(default_factory=list)
     history: List[Dict[str, Any]] = field(default_factory=list)
     speakers: Dict[str, int] = field(default_factory=dict)  # speaker -> evidence count
+    voice_class: Optional[str] = None  # model-derived, untrusted; excluded from fingerprint
     compiler_version: str = "0.1.0"
     policy_version: str = "0.1.0"
 
@@ -161,10 +162,16 @@ class ArtifactIR:
 
 
 def compute_corpus_fingerprint(claims: List[ClaimExport], evidence: List[EvidenceExport]) -> str:
-    """Compute a deterministic fingerprint over corpus state."""
+    """Compute a deterministic fingerprint over corpus state.
+
+    The fingerprint covers ONLY deterministic identity fields (IDs, normalized
+    text, quotes) — never model-derived annotations or timestamps — and is
+    order-independent: inputs are sorted by ID before hashing, so physical
+    row order in the database (which UPDATEs can change) cannot alter it.
+    """
     canonical = {
-        "claims": [(c.id, _claim_hash_proxy(c)) for c in claims],
-        "evidence": [(e.id, _evidence_hash_proxy(e)) for e in evidence],
+        "claims": sorted((c.id, _claim_hash_proxy(c)) for c in claims),
+        "evidence": sorted((e.id, _evidence_hash_proxy(e)) for e in evidence),
     }
     payload = json.dumps(canonical, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()

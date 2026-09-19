@@ -58,6 +58,11 @@ def main():
         "--relationships", action="store_true",
         help="Also propose typed relationships from source texts",
     )
+    voice_parser = subparsers.add_parser("classify-voices", help="Classify human claims into voices (Stage 5, model-derived)")
+    voice_parser.add_argument("--model", default="qwen3:8b", help="Model to use")
+    voice_parser.add_argument("--limit", type=int, default=100, help="Max claims to classify")
+    voice_parser.add_argument("--voice", default="personal", help="Only classify claims for this voice run target (unused filter, kept for CLI symmetry)")
+    voice_parser.add_argument("--status", default="SUPPORTED,VALIDATED", help="Comma-separated claim statuses to include")
 
     args = parser.parse_args()
 
@@ -81,6 +86,8 @@ def main():
         asyncio.run(_cmd_status(args))
     elif args.command == "refine":
         asyncio.run(_cmd_refine(args))
+    elif args.command == "classify-voices":
+        asyncio.run(_cmd_classify_voices(args))
     elif args.command == "investigate":
         asyncio.run(_cmd_investigate(args))
     elif args.command == "agents":
@@ -424,6 +431,92 @@ async def _cmd_agents(args):
             print(f"    [{p.agent_id}] {p.operation}: {d.reason[:80]}")
 
     print(f"\n{'=' * 60}")
+
+
+
+async def _cmd_classify_voices(args):
+    """Classify human-grounded claims into voices (Stage 5 model refinement).
+
+    Model output is untrusted annotation: it NEVER changes claim status or
+    confidence, is stored alongside the model+prompt version that produced
+    it, and is excluded from the corpus fingerprint.
+    """
+    from sqlalchemy import select, update
+    from .database import create_tables, get_session, ClaimRecord, EvidenceUnitRecord
+    from .inference import select_provider, log_inference_event
+    from .refine import classify_voices, VOICE_LABELS
+    from .store_epistemic import EpistemicGraphStore
+
+    await create_tables()
+
+    provider = select_provider()
+    if provider is None:
+        print("No inference provider available — deterministic layer stands alone.")
+        return
+    print(f"Provider: {provider.name} (sovereignty crossed: {provider.sovereignty_crossed})")
+    print(f"Model:    {args.model}")
+
+    statuses = [s.strip().upper() for s in args.status.split(",") if s.strip()]
+
+    # Human-grounded claims: any evidence from user turn or post author,
+    # matching status, not yet classified by this prompt version.
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                select(ClaimRecord.id, ClaimRecord.text, ClaimRecord.confidence)
+                .join(EvidenceUnitRecord, EvidenceUnitRecord.claim_id == ClaimRecord.id)
+                .where(
+                    EvidenceUnitRecord.speaker.in_(["user", "author"]),
+                    ClaimRecord.status.in_(statuses),
+                    (ClaimRecord.voice_class.is_(None))
+                    | (ClaimRecord.voice_prompt_version != "1.0.0"),
+                )
+                .distinct()
+                .order_by(ClaimRecord.confidence.desc())
+                .limit(args.limit)
+            )
+        ).all()
+
+    if not rows:
+        print("No unclassified human-grounded claims found.")
+        return
+
+    targets = [{"claim_id": r.id, "text": r.text} for r in rows]
+    print(f"Classifying {len(targets)} human-grounded claims...")
+
+    report = classify_voices(targets, provider=provider, model=args.model, max_targets=args.limit)
+    classifications = report.classifications
+    print(f"  classified: {len(classifications)} / {len(targets)}")
+
+    if not classifications:
+        print("  no valid classifications — nothing written")
+        return
+
+    # Tally + write back
+    tally: dict = {}
+    async with get_session() as session:
+        for vc in classifications:
+            await session.execute(
+                update(ClaimRecord)
+                .where(ClaimRecord.id == vc.claim_id)
+                .values(
+                    voice_class=vc.voice,
+                    voice_model=vc.model,
+                    voice_prompt_version=vc.prompt_contract_version,
+                )
+            )
+            tally[vc.voice] = tally.get(vc.voice, 0) + 1
+        await session.commit()
+
+    for voice, n in sorted(tally.items(), key=lambda kv: -kv[1]):
+        print(f"  {voice}: {n}")
+
+    # Persist MODEL_INVOKED ledger events
+    store = EpistemicGraphStore()
+    for event in report.inference_events:
+        await store.put_ledger_event(event)
+    print(f"DONE: {len(classifications)} claims annotated (model-derived, untrusted)")
+    print(f"  ledger events: {len(report.inference_events)}")
 
 
 if __name__ == "__main__":
