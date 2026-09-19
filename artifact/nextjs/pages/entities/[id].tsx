@@ -1,4 +1,20 @@
 import { useEffect, useState } from "react";
+import Head from "next/head";
+import fs from "fs";
+import path from "path";
+
+export function getStaticPaths() {
+  const artifactPath = path.join(process.cwd(), "public", "artifact.json");
+  const data = JSON.parse(fs.readFileSync(artifactPath, "utf-8"));
+  const paths = (data.entity_index || []).map((e: any) => ({
+    params: { id: String(e.id) },
+  }));
+  return { paths, fallback: false };
+}
+
+export function getStaticProps({ params }: { params: { id: string } }) {
+  return { props: { entityId: params.id } };
+}
 
 export default function EntityDetail({ entityId }: { entityId: string }) {
   const [data, setData] = useState<any>(null);
@@ -31,6 +47,9 @@ export default function EntityDetail({ entityId }: { entityId: string }) {
 
   return (
     <>
+      <Head>
+        <title>{entity.name} | Ganymede</title>
+      </Head>
       <h1 style={{ marginTop: 0 }}>{entity.name}</h1>
       <div style={{ fontSize: 13, color: "#71717a", marginBottom: 16 }}>
         type: {entity.entity_type} | mentions: {entity.mentions} | claims: {claims.length}

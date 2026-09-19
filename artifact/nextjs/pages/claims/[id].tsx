@@ -1,5 +1,18 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
+import fs from "fs";
+import path from "path";
+
+export function getStaticPaths() {
+  const artifactPath = path.join(process.cwd(), "public", "artifact.json");
+  const data = JSON.parse(fs.readFileSync(artifactPath, "utf-8"));
+  const paths = (data.claims || []).map((c: any) => ({ params: { id: String(c.id) } }));
+  return { paths, fallback: false };
+}
+
+export function getStaticProps({ params }: { params: { id: string } }) {
+  return { props: { claimId: params.id } };
+}
 
 const STATUS_COLORS: Record<string, string> = {
   SUPPORTED: "badge-supported",

@@ -1,6 +1,7 @@
 import type { AppProps } from "next/app";
 import Link from "next/link";
 import { useRouter } from "next/router";
+import { useEffect, useState } from "react";
 import "../styles/globals.css";
 
 const NAV_LINKS = [
@@ -20,6 +21,14 @@ const NAV_LINKS = [
 export default function GanymedeArtifact({ Component, pageProps }: AppProps) {
   const router = useRouter();
   const currentPath = router.asPath;
+  const [fingerprint, setFingerprint] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/artifact.json")
+      .then((r) => r.json())
+      .then((d) => setFingerprint(d.corpus_fingerprint))
+      .catch(() => {});
+  }, []);
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: "#0a0a0f", color: "#e4e4e7" }}>
@@ -88,7 +97,7 @@ export default function GanymedeArtifact({ Component, pageProps }: AppProps) {
         <div style={{ padding: "20px", borderTop: "1px solid #1f1f2e", marginTop: 20 }}>
           <p style={{ fontSize: 11, color: "#71717a", margin: 0 }}>Fingerprint:</p>
           <p style={{ fontSize: 10, color: "#52525b", margin: "4px 0 0", fontFamily: "monospace", wordBreak: "break-all" }}>
-            {pageProps.artifact?.corpus_fingerprint?.slice(0, 16)}...
+            {fingerprint ? `${fingerprint.slice(0, 16)}...` : "—"}
           </p>
         </div>
       </nav>

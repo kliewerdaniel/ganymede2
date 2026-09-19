@@ -1,4 +1,20 @@
 import { useEffect, useState } from "react";
+import Head from "next/head";
+import fs from "fs";
+import path from "path";
+
+export function getStaticPaths() {
+  const artifactPath = path.join(process.cwd(), "public", "artifact.json");
+  const data = JSON.parse(fs.readFileSync(artifactPath, "utf-8"));
+  const paths = (data.views?.evidence || []).map((g: any) => ({
+    params: { id: String(g.source_id) },
+  }));
+  return { paths, fallback: false };
+}
+
+export function getStaticProps({ params }: { params: { id: string } }) {
+  return { props: { sourceId: params.id } };
+}
 
 export default function EvidenceDetail({ sourceId }: { sourceId: string }) {
   const [data, setData] = useState<any>(null);
@@ -29,6 +45,9 @@ export default function EvidenceDetail({ sourceId }: { sourceId: string }) {
 
   return (
     <>
+      <Head>
+        <title>{sourceId} | Ganymede</title>
+      </Head>
       <h1 style={{ marginTop: 0 }}>{sourceId}</h1>
       <p style={{ color: "#a1a1aa" }}>{source.units.length} evidence unit(s)</p>
 

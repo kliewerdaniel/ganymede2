@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import Head from "next/head";
+import { useRouter } from "next/router";
 
 interface ArtifactData {
   version: string;
@@ -49,7 +50,9 @@ function MetaLabel({ label, value }: { label: string; value: string | number | u
   );
 }
 
-export default function Home({ view }: { view: string }) {
+export default function Home() {
+  const router = useRouter();
+  const view = (router.query.view as string) || "narrative";
   const [data, setData] = useState<ArtifactData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -87,6 +90,9 @@ function NarrativeView({ views, data }: { views: any; data: ArtifactData }) {
   const narrative = data.intermediates?.narrative_document;
   return (
     <>
+      <Head>
+        <title>Ganymede — Narrative</title>
+      </Head>
       <h1 style={{ marginTop: 0 }}>Narrative</h1>
       <p style={{ color: "#a1a1aa", maxWidth: 800 }}>
         What Ganymede establishes — claims with SUPPORTED or VALIDATED status, ordered by confidence.
