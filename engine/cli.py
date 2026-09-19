@@ -102,6 +102,7 @@ async def _cmd_artifact_build(args):
     from .artifact_compiler import ArtifactCompiler
     from sqlalchemy import select
     from .database import ClaimRecord, EvidenceUnitRecord, SourceRecord, ContradictionRecord, InvestigationRecord
+    import shutil
 
     await create_tables()
     output_dir = Path(args.output)
@@ -163,6 +164,20 @@ async def _cmd_artifact_build(args):
         dossier_path.write_text(json.dumps(dossier, indent=2, default=str))
 
     print(f"\nArtifact build complete. Fingerprint: {ir.corpus_fingerprint}")
+
+    # Also copy to Next.js public directory
+    nextjs_public = Path("../artifact/nextjs/public")
+    if nextjs_public.exists():
+        shutil.copy2(ir_path, nextjs_public / "artifact.json")
+        # Copy intermediates
+        for name in ["knowledge_graph.json", "narrative.md", "established_facts.json",
+                     "timeline.json", "contradiction_report.md", "source_inventory.json"]:
+            src = output_dir / name
+            if src.exists():
+                shutil.copy2(src, nextjs_public / name)
+        print(f"Copied to {nextjs_public}")
+    else:
+        print(f"Note: {nextjs_public} not found. Run from project root.")
 
 
 def _row_to_dict(row) -> dict:
