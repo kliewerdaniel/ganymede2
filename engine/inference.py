@@ -532,10 +532,20 @@ class OpenAICompatProvider:
             f"Classify the TEXT into exactly one category from: {label_list}.\n"
             f"Reply with only the category name, nothing else.\n\nTEXT: {text}"
         )
-        result = self._chat(model, prompt, max_tokens=8)
+        result = self.generate_structured(prompt, model=model, schema={
+            "type": "object",
+            "properties": {"category": {"type": "string", "enum": labels}},
+            "required": ["category"],
+        })
         result.operation = "classify"
         if result.ok:
-            matched = OllamaProvider._match_label(str(result.output), labels)
+            try:
+                parsed = json.loads(str(result.output))
+                matched = parsed.get("category")
+            except (json.JSONDecodeError, AttributeError):
+                matched = None
+            if matched not in labels:
+                matched = OllamaProvider._match_label(str(result.output), labels)
             if matched is None:
                 result.ok = False
                 result.error = f"model output matched no label: {result.output!r}"
@@ -544,7 +554,10 @@ class OpenAICompatProvider:
         return result
 
     def extract(self, prompt: str, *, model: str, schema: Optional[dict] = None) -> InferenceResult:
-        result = self._chat(model, prompt)
+        # Structured output (response_format json_schema) beats parsing prose
+        # out of thinking-mode models — mirrors the Ollama provider path.
+        json_schema = schema or {"type": "object"}
+        result = self.generate_structured(prompt, model=model, schema=json_schema)
         result.operation = "extract"
         if not result.ok:
             return result
@@ -558,10 +571,20 @@ class OpenAICompatProvider:
 
     def verify(self, question: str, passage: str, *, model: str) -> InferenceResult:
         prompt = VERIFIER_PROMPT.format(question=question, passage=passage)
-        result = self._chat(model, prompt, max_tokens=5)
+        result = self.generate_structured(prompt, model=model, schema={
+            "type": "object",
+            "properties": {"answer": {"type": "string", "enum": ["YES", "NO"]}},
+            "required": ["answer"],
+        })
         result.operation = "verify"
         if result.ok:
-            out = str(result.output).strip().upper()
+            answer = None
+            try:
+                parsed = json.loads(str(result.output))
+                answer = parsed.get("answer", "")
+            except (json.JSONDecodeError, AttributeError):
+                answer = str(result.output).strip().upper()
+            out = str(answer).strip().upper()
             if out.startswith("YES"):
                 result.output = True
             elif out.startswith("NO"):

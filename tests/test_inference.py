@@ -5,6 +5,7 @@ Live tests (TestLiveOllama) are skipped automatically when Ollama is not running
 """
 
 import json
+import os
 from pathlib import Path
 
 import httpx
@@ -437,3 +438,62 @@ class TestLiveOllama:
         result = provider.extract(prompt, model="qwen3:4b")
         assert result.ok, result.error
         assert isinstance(result.output, dict)
+
+
+# ---------------------------------------------------------------------------
+# Live OpenAI-compatible tests via Ollama's /v1 endpoint (Phase 5 close-out:
+# classify/extract/verify now use generate_structured, not raw _chat)
+# ---------------------------------------------------------------------------
+
+OPENAI_COMPAT = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+
+
+def _compat_reachable() -> bool:
+    try:
+        return httpx.get(f"{OPENAI_COMPAT}/v1/models", timeout=2).status_code == 200
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _compat_reachable(), reason="OpenAI-compatible endpoint not running")
+class TestLiveOpenAICompat:
+    def _provider(self) -> OpenAICompatProvider:
+        return OpenAICompatProvider("local-compat", f"{OPENAI_COMPAT}/v1", api_key_env=None)
+
+    def test_classify_structured(self):
+        result = self._provider().classify(
+            "Chris played guitar at local venues in Seattle.",
+            model="qwen3:4b",
+            labels=["music", "sports", "cooking"],
+        )
+        assert result.ok, result.error
+        assert result.output == "music"
+        assert result.operation == "classify"
+
+    def test_classify_rejects_off_label(self):
+        # schema enum + _match_label fallback: garbage in -> ok=False, not a crash
+        result = self._provider().classify(
+            "Quantum flux capacitor calibration notes",
+            model="qwen3:4b",
+            labels=["music", "sports", "cooking"],
+        )
+        assert isinstance(result, InferenceResult)
+        assert result.ok is False or result.output in ("music", "sports", "cooking")
+
+    def test_extract_structured(self):
+        prompt = "Extract the person's name as JSON: Marcus Aurelius was a Roman emperor."
+        result = self._provider().extract(
+            prompt, model="qwen3:4b",
+            schema={"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        )
+        assert result.ok, result.error
+        assert isinstance(result.output, dict)
+        assert result.output.get("name") == "Marcus Aurelius"
+
+    def test_verify_structured(self):
+        provider = self._provider()
+        passage = "Christopher James Kliewer was born on March 15, 1985, in Seattle, Washington."
+        r_yes = provider.verify("Where was Chris born?", passage, model="qwen3:4b")
+        assert r_yes.ok and r_yes.output is True, r_yes.error
+        r_no = provider.verify("What color was Chris's car?", passage, model="qwen3:4b")
+        assert r_no.ok and r_no.output is False
