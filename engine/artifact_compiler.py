@@ -29,6 +29,55 @@ from .artifact_ir import (
     compute_corpus_fingerprint,
 )
 
+import re as _re
+
+
+# ---------------------------------------------------------------------------
+# Narrative ordering policy (shared by the narrative view, the sharded
+# index summary, and the narrative document).
+#
+# 1. Human-grounded claims (user/author evidence) rank above
+#    assistant/system boilerplate, however corroborated.
+# 2. Within the human tier, model-classified PERSONAL voice leads —
+#    the corpus subject's own life, not prompt-engineering text.
+#    (voice_class is model-derived and untrusted; when absent or
+#    unclassified, claims rank by the remaining keys unchanged.)
+# 3. Then confidence, then claim ID for total determinism.
+# ---------------------------------------------------------------------------
+
+def human_share(c: ClaimExport) -> float:
+    """Fraction of a claim's evidence spoken by humans (user/author)."""
+    if not c.speakers:
+        return 0.0
+    human = c.speakers.get("user", 0) + c.speakers.get("author", 0)
+    return human / sum(c.speakers.values())
+
+
+def personal_rank(c: ClaimExport) -> int:
+    """0 = personal voice (leads), 1 = other human-grounded, 2 = machine."""
+    if c.voice_class == "personal":
+        return 0
+    return 1 if human_share(c) > 0 else 2
+
+
+def narrative_key(c: ClaimExport):
+    """Deterministic narrative ordering key — personal, human, machine."""
+    return (personal_rank(c), -human_share(c), -c.confidence, c.id)
+
+
+def md_inline(text: str) -> str:
+    """Flatten claim text to a single line for embedding in the narrative
+    document.
+
+    Claim text is raw corpus content and may contain Markdown structure
+    (``##`` headers, list items, code fences). Left intact, a single claim
+    can forge phantom sections in the compiled document. The original
+    text remains available verbatim in the claim shards and detail views;
+    the narrative document is a synthesis surface, so it embeds a
+    whitespace-collapsed rendering that cannot introduce structure.
+    """
+    return " ".join(text.split())
+
 
 class ArtifactCompiler:
     """Compiles the Epistemic Graph into an Artifact IR."""
@@ -205,23 +254,13 @@ class ArtifactCompiler:
         sources: List[SourceExport],
     ) -> ViewIndex:
         """Pre-compute view data."""
-        # Narrative: SUPPORTED/VALIDATED claims — personal voice first, then
-        # human-grounded, then by confidence (assistant/system boilerplate last).
-        def _human_share(c: ClaimExport) -> float:
-            if not c.speakers:
-                return 0.0
-            human = c.speakers.get("user", 0) + c.speakers.get("author", 0)
-            return human / sum(c.speakers.values())
-
-        def _personal_rank(c: ClaimExport) -> int:
-            if c.voice_class == "personal":
-                return 0
-            return 1 if _human_share(c) > 0 else 2
-
+        # Narrative: SUPPORTED/VALIDATED claims ordered by the shared
+        # narrative policy — personal voice first, then human-grounded,
+        # then confidence (assistant/system boilerplate last).
         narrative_claims = [
             c for c in claims if c.status in ("SUPPORTED", "VALIDATED")
         ]
-        narrative_claims.sort(key=lambda c: (_personal_rank(c), -_human_share(c), -c.confidence, c.id))
+        narrative_claims.sort(key=narrative_key)
         narrative = [
             {
                 "claim_id": c.id,
@@ -449,34 +488,84 @@ class ArtifactCompiler:
     def _build_narrative_document(
         self, claims: List[ClaimExport], evidence: List[EvidenceExport]
     ) -> str:
-        """Build a Markdown narrative document."""
-        lines = ["# Narrative", ""]
+        """Build a Markdown narrative document.
 
-        # Group claims by status
-        supported = [c for c in claims if c.status in ("SUPPORTED", "VALIDATED")]
-        supported.sort(key=lambda c: c.confidence, reverse=True)
+        Voice-aware: claims are grouped by narrative tier (personal /
+        other human-grounded / machine) and ordered by the shared
+        narrative policy, so the corpus subject's own voice leads the
+        document instead of high-confidence assistant boilerplate.
+        """
+        lines = [
+            "# Narrative",
+            "",
+            f"_Compiled from {len(claims)} claims. Ordering: personal voice "
+            f"first, then other human-grounded claims, then machine-derived. "
+            f"Voice classes are model-derived and untrusted._",
+            "",
+        ]
 
-        if supported:
-            lines.append("## Established Facts")
+        established = [c for c in claims if c.status in ("SUPPORTED", "VALIDATED")]
+        established.sort(key=narrative_key)
+
+        # Tier 1 — personal voice: the subject speaking about their own life.
+        personal = [c for c in established if personal_rank(c) == 0]
+        # Tier 2 — other human-grounded claims (user/author evidence).
+        human = [c for c in established if personal_rank(c) == 1]
+        # Tier 3 — machine-derived claims (assistant/system evidence).
+        machine = [c for c in established if personal_rank(c) == 2]
+
+        if personal:
+            lines.append("## In Their Own Words")
             lines.append("")
-            for c in supported:
-                lines.append(f"- {c.text} (confidence: {c.confidence:.2f})")
+            lines.append(
+                f"_Personal-voice claims ({len(personal)}). The corpus "
+                f"subject's own account of their life, work, and world._"
+            )
+            lines.append("")
+            for c in personal:
+                lines.append(f"- {md_inline(c.text)} (confidence: {c.confidence:.2f})")
+            lines.append("")
+
+        if human:
+            lines.append("## Grounded in Human Voices")
+            lines.append("")
+            lines.append(
+                f"_Human-grounded claims ({len(human)}) — user turns and "
+                f"post authors, other than personal voice._"
+            )
+            lines.append("")
+            for c in human:
+                lines.append(f"- {md_inline(c.text)} (confidence: {c.confidence:.2f})")
+            lines.append("")
+
+        if machine:
+            lines.append("## Machine-Derived Context")
+            lines.append("")
+            lines.append(
+                f"_Assistant- and system-derived claims ({len(machine)}). "
+                f"Corroborated, but not spoken by a human._"
+            )
+            lines.append("")
+            for c in machine:
+                lines.append(f"- {md_inline(c.text)} (confidence: {c.confidence:.2f})")
             lines.append("")
 
         contested = [c for c in claims if c.status == "CONTESTED"]
         if contested:
+            contested.sort(key=narrative_key)
             lines.append("## Contested Claims")
             lines.append("")
             for c in contested:
-                lines.append(f"- {c.text}")
+                lines.append(f"- {md_inline(c.text)}")
             lines.append("")
 
         insufficient = [c for c in claims if c.status == "INSUFFICIENT"]
         if insufficient:
+            insufficient.sort(key=narrative_key)
             lines.append("## Insufficient Evidence")
             lines.append("")
             for c in insufficient:
-                lines.append(f"- {c.text}")
+                lines.append(f"- {md_inline(c.text)}")
             lines.append("")
 
         return "\n".join(lines)
@@ -659,29 +748,8 @@ class ArtifactCompiler:
 
         # Capped view summaries for the index (full data lives in shards)
         NARRATIVE_CAP = 500
-        # Narrative ordering policy (deterministic given the same inputs):
-        # 1. Human-grounded claims (user/author evidence) rank above
-        #    assistant/system boilerplate, however corroborated.
-        # 2. Within the human tier, model-classified PERSONAL voice leads —
-        #    the corpus subject's own life, not prompt-engineering text.
-        #    (voice_class is model-derived and untrusted; when absent or
-        #    unclassified, claims rank by the remaining keys unchanged.)
-        # 3. Then confidence, then claim ID for total determinism.
-        def human_share(c: ClaimExport) -> float:
-            if not c.speakers:
-                return 0.0
-            human = c.speakers.get("user", 0) + c.speakers.get("author", 0)
-            return human / sum(c.speakers.values())
-
-        def personal_rank(c: ClaimExport) -> int:
-            # 0 = personal (leads), 1 = other human, 2 = machine/no-voice
-            if c.voice_class == "personal":
-                return 0
-            return 1 if human_share(c) > 0 else 2
-
-        def narrative_key(c: ClaimExport):
-            return (personal_rank(c), -human_share(c), -c.confidence, c.id)
-
+        # Narrative ordering policy: shared with _build_views — see
+        # narrative_key() at module top for the full policy statement.
         narrative_summary = [
             {
                 "claim_id": c.id,

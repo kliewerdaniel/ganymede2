@@ -153,7 +153,9 @@ class TestArtifactCompiler:
         ir = compiler.compile()
         doc = ir.intermediates.narrative_document
         assert "# Narrative" in doc
-        assert "## Established Facts" in doc
+        # Voice-aware tiers: the fixture evidence carries no speaker data,
+        # so its claims are not human-grounded and land in the machine tier.
+        assert "## Machine-Derived Context" in doc
         assert "## Contested Claims" in doc
 
     def test_established_facts_filtered(self):
